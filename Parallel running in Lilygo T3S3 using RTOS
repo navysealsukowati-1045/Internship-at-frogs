@@ -1,0 +1,77 @@
+#Parallel running using RTOS in Lilygo T3-S3
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include "esp_heap_caps.h" // For heap_caps_get_largest_free_block()
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET   -1
+#define OLED_SDA     18
+#define OLED_SCL     17
+#define LED_PIN      37
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// Task handles
+TaskHandle_t blinkTaskHandle = NULL;
+TaskHandle_t oledTaskHandle = NULL;
+
+// OLED Task
+void oledTask(void *parameter) {
+  Wire.begin(OLED_SDA, OLED_SCL);
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println(F("SSD1306 allocation failed"));
+    vTaskDelete(NULL);
+  }
+
+  display.clearDisplay();
+  display.display();
+
+  while (true) {
+    // Ambil status heap
+    uint32_t totalHeap = ESP.getHeapSize();
+    uint32_t freeHeap = ESP.getFreeHeap();
+    uint32_t minHeap = esp_get_minimum_free_heap_size();
+    uint32_t largestBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+
+    // Update OLED
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    display.println("Heap Monitor");
+    display.printf("Total Heap: %y/n", totalHeap);
+    display.printf("Free Heap: %u\n", freeHeap);
+    display.printf("Min Heap: %u\n", minHeap);
+    display.printf("Big Heap: %u\n", largestBlock);
+    display.display();
+
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+  }
+}
+
+// Blink Task
+void blinkTask(void *parameter) {
+  pinMode(LED_PIN, OUTPUT);
+  bool ledState = false;
+
+  while (true) {
+    ledState = !ledState;
+    digitalWrite(LED_PIN, ledState);
+    vTaskDelay(500 / portTICK_PERIOD_MS);
+  }
+}
+
+// Setup 
+void setup() {
+  Serial.begin(115200);
+
+  xTaskCreatePinnedToCore(blinkTask, "Blink LED", 1024, NULL, 1, &blinkTaskHandle, 1);
+  xTaskCreatePinnedToCore(oledTask, "OLED Heap Monitor", 4096, NULL, 1, &oledTaskHandle, 0);
+}
+
+void loop() {
+// Excecuted by task
+}
