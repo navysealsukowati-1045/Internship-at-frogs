@@ -1,0 +1,95 @@
+#include <U8g2lib.h>
+#include <Wire.h>
+
+// OLED via U8G2 (I2C)
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/U8X8_PIN_NONE, /* scl=*/17, /* sda=*/18);
+
+// LED
+#define LED_PIN 37
+
+// Stack size
+#define STACK_SIZE 2048
+
+// Task handles
+TaskHandle_t TaskLED;
+TaskHandle_t TaskOLED;
+
+// Memory usage
+size_t heapStart;
+UBaseType_t stackFreeLED = 0;
+UBaseType_t stackFreeOLED = 0;
+
+// --- LED Task ---
+void taskLED(void *pvParameters) {
+  pinMode(LED_PIN, OUTPUT);
+  while (1) {
+    digitalWrite(LED_PIN, HIGH);
+    vTaskDelay(pdMS_TO_TICKS(300));
+    digitalWrite(LED_PIN, LOW);
+    vTaskDelay(pdMS_TO_TICKS(300));
+
+    // Capture stack free space
+    stackFreeLED = uxTaskGetStackHighWaterMark(NULL);
+  }
+}
+
+// OLED Task 
+void taskOLED(void *pvParameters) {
+  u8g2.begin();
+
+  while (1) {
+    stackFreeOLED = uxTaskGetStackHighWaterMark(NULL);
+    size_t heapFree = esp_get_free_heap_size();
+    size_t heapUsed = heapStart - heapFree;
+
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_5x8_tr);
+    u8g2.setCursor(0, 10);
+    u8g2.print("LED Stack Free: ");
+    u8g2.print(stackFreeLED * 4);
+    u8g2.setCursor(0, 20);
+    u8g2.print("OLED Stack Free: ");
+    u8g2.print(stackFreeOLED * 4);
+    u8g2.setCursor(0, 30);
+    u8g2.print("Heap Used: ");
+    u8g2.print(heapUsed);
+    u8g2.setCursor(0, 40);
+    u8g2.print("Heap Free: ");
+    u8g2.print(heapFree);
+    u8g2.sendBuffer();
+
+    vTaskDelay(pdMS_TO_TICKS(1000));
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  // Save initial heap 
+  heapStart = esp_get_free_heap_size();
+
+  // LED task
+  xTaskCreatePinnedToCore(
+    taskLED,
+    "LED Task",
+    STACK_SIZE,
+    NULL,
+    1,
+    &TaskLED,
+    1);
+
+  // OLED task
+  xTaskCreatePinnedToCore(
+    taskOLED,
+    "OLED Task",
+    STACK_SIZE,
+    NULL,
+    1,
+    &TaskOLED,
+    0);
+}
+
+void loop() {
+  // Kosong
+}
