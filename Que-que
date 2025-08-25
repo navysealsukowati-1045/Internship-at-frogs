@@ -1,0 +1,101 @@
+//Que-que in Lilygo T3-S3
+
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+
+// Constants
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define OLED_SDA 18
+#define OLED_SCL 17
+#define LED_PIN 37
+#define QUEUE_LENGTH 3
+#define QUEUE_DELAY 500
+
+// OLED display object
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// Task handles
+TaskHandle_t blinkTaskHandle = NULL;
+TaskHandle_t oledTaskHandle = NULL;
+
+// Queue handle
+QueueHandle_t countQueue;
+
+// Function to initialize OLED display
+bool initDisplay() {
+ Wire.begin(OLED_SDA, OLED_SCL);
+ if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+ return false;
+ }
+ return true;
+}
+
+// LED Task
+void blinkTask(void *parameter) {
+ pinMode(LED_PIN, OUTPUT);
+ int count = 0;
+ bool ledState = false;
+ while (true) {
+ ledState = !ledState;
+ digitalWrite(LED_PIN, ledState);
+
+ // Send count to queue
+ if (xQueueSend(countQueue, &count, 100) != pdTRUE) {
+ Serial.println("Queue send failed (queue full or timeout)");
+ }
+ count++;
+ vTaskDelay(QUEUE_DELAY / portTICK_PERIOD_MS);
+ }
+}
+
+// OLED Task
+void oledTask(void *parameter) {
+ if (!initDisplay()) {
+ Serial.println(F("SSD1306 allocation failed"));
+ vTaskDelete(NULL);
+ }
+ int receivedCount = 0;
+ while (true) {
+ if (xQueueReceive(countQueue, &receivedCount, 100) == pdTRUE) {
+ display.clearDisplay();
+ display.setTextSize(2);
+ display.setTextColor(SSD1306_WHITE);
+ display.setCursor(0, 0);
+ display.println(F("It’s Navy’s Board!"));
+ display.setTextSize(1);
+ display.setCursor(0, 50);
+ display.print("Count: ");
+ display.println(receivedCount);
+ display.display();
+ }
+ vTaskDelay(QUEUE_DELAY / portTICK_PERIOD_MS);
+ }
+}
+
+// Setup function
+void setup() {
+ Serial.begin(115200);
+ delay(500);
+
+ // Initialize queue
+ countQueue = xQueueCreate(QUEUE_LENGTH, sizeof(int));
+ if (countQueue == NULL) {
+ Serial.println("Queue creation failed!");
+ }
+
+ // Create tasks
+ xTaskCreatePinnedToCore(blinkTask, "Blink LED", 2048, NULL, 1, 
+&blinkTaskHandle, 0);
+ xTaskCreatePinnedToCore(oledTask, "OLED Display", 4096, NULL, 1, 
+&oledTaskHandle, 1);
+}
+
+// Loop function
+void loop() {
+}
