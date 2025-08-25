@@ -1,4 +1,4 @@
-#Parallel running using RTOS in Lilygo T3-S3
+//Parallel running using RTOS in Lilygo T3-S3
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
