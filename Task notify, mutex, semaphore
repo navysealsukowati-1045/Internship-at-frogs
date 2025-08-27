@@ -8,18 +8,18 @@
 
 Adafruit_SSD1306 display(128, 64, &Wire);
 
-TaskHandle_t taskLEDHandle = NULL;
-TaskHandle_t taskOLEDHandle = NULL;
+TaskHandle_t task_led_handle = NULL;
+TaskHandle_t task_oled_handle = NULL;
 
 // ISR tombol
-void IRAM_ATTR buttonISR() {
-  BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-  vTaskNotifyGiveFromISR(taskLEDHandle, &xHigherPriorityTaskWoken);
-  portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+void IRAM_ATTR button_isr() {
+  BaseType_t higher_priority_task_woken = pdFALSE;
+  vTaskNotifyGiveFromISR(task_led_handle, &higher_priority_task_woken);
+  portYIELD_FROM_ISR(higher_priority_task_woken);
 }
 
 // Task LED
-void taskLED(void *pvParameters) {
+void task_led(void *pv_parameters) {
   bool state = false;
   for (;;) {
     // Tunggu notifikasi dari ISR tombol
@@ -29,23 +29,23 @@ void taskLED(void *pvParameters) {
     digitalWrite(LED_PIN, state);
 
     // Kirim status LED ke task OLED via notify
-    uint32_t valueToSend = state ? 1 : 0;
-    xTaskNotify(taskOLEDHandle, valueToSend, eSetValueWithOverwrite);
+    uint32_t value_to_send = state ? 1 : 0;
+    xTaskNotify(task_oled_handle, value_to_send, eSetValueWithOverwrite);
   }
 }
 
 // Task OLED
-void taskOLED(void *pvParameters) {
-  uint32_t ledStatus;
+void task_oled(void *pv_parameters) {
+  uint32_t led_status;
   for (;;) {
     // Tunggu notifikasi dari task LED
-    xTaskNotifyWait(0, 0, &ledStatus, portMAX_DELAY);
+    xTaskNotifyWait(0, 0, &led_status, portMAX_DELAY);
 
     display.clearDisplay();
     display.setTextSize(2);
     display.setTextColor(SSD1306_WHITE);
     display.setCursor(0, 0);
-    display.println(ledStatus ? "LED: ON" : "LED: OFF");
+    display.println(led_status ? "LED: ON" : "LED: OFF");
     display.display();
   }
 }
@@ -64,11 +64,11 @@ void setup() {
   display.display();
 
   // Buat task
-  xTaskCreatePinnedToCore(taskLED, "TaskLED", 2048, NULL, 2, &taskLEDHandle, 1);
-  xTaskCreatePinnedToCore(taskOLED, "TaskOLED", 4096, NULL, 1, &taskOLEDHandle, 1);
+  xTaskCreatePinnedToCore(task_led, "task_led", 2048, NULL, 2, &task_led_handle, 1);
+  xTaskCreatePinnedToCore(task_oled, "task_oled", 4096, NULL, 1, &task_oled_handle, 1);
 
   // Attach interrupt tombol
-  attachInterrupt(BTN_PIN, buttonISR, FALLING);
+  attachInterrupt(BTN_PIN, button_isr, FALLING);
 
   // Tampilkan pesan awal
   display.setTextSize(2);
