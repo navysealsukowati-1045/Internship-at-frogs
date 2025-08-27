@@ -1,0 +1,82 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+#define LED_PIN  37
+#define BTN_PIN  0
+
+Adafruit_SSD1306 display(128, 64, &Wire);
+
+TaskHandle_t taskLEDHandle = NULL;
+TaskHandle_t taskOLEDHandle = NULL;
+
+// ISR tombol
+void IRAM_ATTR buttonISR() {
+  BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+  vTaskNotifyGiveFromISR(taskLEDHandle, &xHigherPriorityTaskWoken);
+  portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+}
+
+// Task LED
+void taskLED(void *pvParameters) {
+  bool state = false;
+  for (;;) {
+    // Tunggu notifikasi dari ISR tombol
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+    state = !state;
+    digitalWrite(LED_PIN, state);
+
+    // Kirim status LED ke task OLED via notify
+    uint32_t valueToSend = state ? 1 : 0;
+    xTaskNotify(taskOLEDHandle, valueToSend, eSetValueWithOverwrite);
+  }
+}
+
+// Task OLED
+void taskOLED(void *pvParameters) {
+  uint32_t ledStatus;
+  for (;;) {
+    // Tunggu notifikasi dari task LED
+    xTaskNotifyWait(0, 0, &ledStatus, portMAX_DELAY);
+
+    display.clearDisplay();
+    display.setTextSize(2);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    display.println(ledStatus ? "LED: ON" : "LED: OFF");
+    display.display();
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(LED_PIN, OUTPUT);
+  pinMode(BTN_PIN, INPUT_PULLUP);
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("OLED gagal!");
+    for (;;);
+  }
+  display.clearDisplay();
+  display.display();
+
+  // Buat task
+  xTaskCreatePinnedToCore(taskLED, "TaskLED", 2048, NULL, 2, &taskLEDHandle, 1);
+  xTaskCreatePinnedToCore(taskOLED, "TaskOLED", 4096, NULL, 1, &taskOLEDHandle, 1);
+
+  // Attach interrupt tombol
+  attachInterrupt(BTN_PIN, buttonISR, FALLING);
+
+  // Tampilkan pesan awal
+  display.setTextSize(2);
+  display.setCursor(0, 0);
+  display.println("System Ready");
+  display.display();
+}
+
+void loop() {
+  // kosong, RTOS yang jalan
+}
