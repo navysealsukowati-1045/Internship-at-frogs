@@ -1,0 +1,93 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+#define LED_PIN  37
+#define BTN_PIN  0   // tombol eksternal (gunakan GPIO sesuai board)
+
+Adafruit_SSD1306 display(128, 64, &Wire);
+
+SemaphoreHandle_t xBinarySemaphore;   // untuk LED (sinkronisasi tombol → task LED)
+SemaphoreHandle_t xMutex;             // untuk proteksi akses OLED
+QueueHandle_t xQueue;                 // untuk kirim pesan antar task
+
+// Struktur pesan untuk queue
+typedef struct {
+  char text[32];
+} Message;
+
+void IRAM_ATTR buttonISR() {
+  BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+  xSemaphoreGiveFromISR(xBinarySemaphore, &xHigherPriorityTaskWoken);
+  portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+}
+
+// Task LED
+void taskLED(void *pvParameters) {
+  bool state = false;
+  for (;;) {
+    if (xSemaphoreTake(xBinarySemaphore, portMAX_DELAY)) {
+      state = !state;
+      digitalWrite(LED_PIN, state);
+
+      // Kirim status LED ke queue agar ditampilkan di OLED
+      Message msg;
+      snprintf(msg.text, sizeof(msg.text), "LED: %s", state ? "ON" : "OFF");
+      xQueueSend(xQueue, &msg, portMAX_DELAY);
+    }
+  }
+}
+
+// Task OLED
+void taskOLED(void *pvParameters) {
+  Message rxMsg;
+  for (;;) {
+    if (xQueueReceive(xQueue, &rxMsg, portMAX_DELAY)) {
+      if (xSemaphoreTake(xMutex, portMAX_DELAY)) {
+        display.clearDisplay();
+        display.setTextSize(2);
+        display.setTextColor(SSD1306_WHITE);
+        display.setCursor(0, 0);
+        display.println(rxMsg.text);
+        display.display();
+        xSemaphoreGive(xMutex);
+      }
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(LED_PIN, OUTPUT);
+  pinMode(BTN_PIN, INPUT_PULLUP);
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("OLED gagal!");
+    for (;;);
+  }
+  display.clearDisplay();
+  display.display();
+
+  // Buat semaphore, mutex, queue
+  xBinarySemaphore = xSemaphoreCreateBinary();
+  xMutex = xSemaphoreCreateMutex();
+  xQueue = xQueueCreate(5, sizeof(Message));
+
+  // Attach interrupt tombol
+  attachInterrupt(BTN_PIN, buttonISR, FALLING);
+
+  // Buat task
+  xTaskCreatePinnedToCore(taskLED, "TaskLED", 2048, NULL, 2, NULL, 1);
+  xTaskCreatePinnedToCore(taskOLED, "TaskOLED", 4096, NULL, 1, NULL, 1);
+
+  // Kirim pesan awal ke OLED
+  Message startMsg;
+  snprintf(startMsg.text, sizeof(startMsg.text), "System Ready");
+  xQueueSend(xQueue, &startMsg, portMAX_DELAY);
+}
+
+void loop() {
+  // kosong → FreeRTOS yang jalanin task
+}
