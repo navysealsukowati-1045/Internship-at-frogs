@@ -1,0 +1,56 @@
+#include <Arduino.h>
+
+QueueHandle_t xQueue = NULL;
+
+void IRAM_ATTR isrHandler() {
+  uint32_t timestamp = millis();  // data contoh yang dikirim ke task
+
+  BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+  // kirim data ke queue dari ISR
+  xQueueSendFromISR(xQueue, &timestamp, &xHigherPriorityTaskWoken);
+
+  // kasih tahu scheduler kalau perlu switch task
+  portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+}
+
+void vTaskHandler(void *pvParameters) {
+  uint32_t receivedData;
+
+  for (;;) {
+    // tunggu data dari ISR
+    if (xQueueReceive(xQueue, &receivedData, portMAX_DELAY) == pdTRUE) {
+      Serial.print("Interrupt ditangani di task, timestamp: ");
+      Serial.println(receivedData);
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  // buat queue dengan kapasitas 10 elemen
+  xQueue = xQueueCreate(10, sizeof(uint32_t));
+
+  if (xQueue == NULL) {
+    Serial.println("Gagal buat queue!");
+    while (1);
+  }
+
+  // attach ISR di pin 0, trigger FALLING edge
+  attachInterrupt(digitalPinToInterrupt(0), isrHandler, FALLING);
+
+  // buat task untuk handle data dari ISR
+  xTaskCreatePinnedToCore(
+    vTaskHandler,    // fungsi task
+    "TaskHandler",   // nama task
+    4096,            // stack size
+    NULL,            // parameter
+    2,               // prioritas task
+    NULL,            // task handle
+    1                // core (pakai core 1)
+  );
+}
+
+void loop() {
+  // kosong, semua kerja di task
+}
