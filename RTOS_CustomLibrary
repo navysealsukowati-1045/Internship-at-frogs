@@ -1,0 +1,48 @@
+#include <Arduino.h>
+#include <Navy_package.h>
+
+Navy_package Navy(37);
+
+// handle task
+TaskHandle_t TaskLED;
+TaskHandle_t TaskOLED;
+TaskHandle_t TaskLoRa;
+
+// LED
+void taskLed(void *pvParameters) {
+  Navy.beginLED();
+  for(;;) {
+    Navy.ledToggle();
+    vTaskDelay(500 / portTICK_PERIOD_MS);
+  }
+}
+
+// OLED
+void taskOLED(void *pvParameters) {
+  Navy.beginDisplay();
+  for(;;) {
+    Navy.showMessage("SYSTEM OKEEE");
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
+  }
+}
+
+// LoRa
+void taskLoRa(void *pvParameters) {
+  Navy.beginLoRa(915E6);
+  for(;;) {
+    Navy.sendLoRa("Pesan dari RTOS Task!");
+    vTaskDelay(5000 / portTICK_PERIOD_MS);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  //Task RTOS
+  xTaskCreatePinnedToCore(taskLed,  "TaskLED",  2048, NULL, 1, &TaskLED, 1);
+  xTaskCreatePinnedToCore(taskOLED, "TaskOLED", 4096, NULL, 1, &TaskOLED, 1);
+  xTaskCreatePinnedToCore(taskLoRa, "TaskLoRa", 4096, NULL, 1, &TaskLoRa, 1);
+}
+
+void loop() {
+}
