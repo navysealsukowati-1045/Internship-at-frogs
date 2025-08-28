@@ -2,24 +2,33 @@
 
 QueueHandle_t xQueue = NULL;
 
+// ISR tombol
 void IRAM_ATTR isrHandler() {
-  uint32_t timestamp = millis();  // data contoh yang dikirim ke task
+  uint32_t timestamp = millis();
 
   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-  // kirim data ke queue dari ISR
   xQueueSendFromISR(xQueue, &timestamp, &xHigherPriorityTaskWoken);
 
-  // kasih tahu scheduler kalau perlu switch task
   portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
+// Task untuk blink LED
+void vTaskBlink(void *pvParameters) {
+  pinMode(LED_BUILTIN, OUTPUT);
+
+  for (;;) {
+    digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+    vTaskDelay(500 / portTICK_PERIOD_MS);  // delay 500 ms
+  }
+}
+
+// Task untuk handle interrupt
 void vTaskHandler(void *pvParameters) {
   uint32_t receivedData;
 
   for (;;) {
-    // tunggu data dari ISR
     if (xQueueReceive(xQueue, &receivedData, portMAX_DELAY) == pdTRUE) {
-      Serial.print("Interrupt ditangani di task, timestamp: ");
+      Serial.print("Interrupt ditangani, timestamp: ");
       Serial.println(receivedData);
     }
   }
@@ -28,29 +37,40 @@ void vTaskHandler(void *pvParameters) {
 void setup() {
   Serial.begin(115200);
 
-  // buat queue dengan kapasitas 10 elemen
+  // Buat queue dengan kapasitas 10 elemen
   xQueue = xQueueCreate(10, sizeof(uint32_t));
-
   if (xQueue == NULL) {
     Serial.println("Gagal buat queue!");
     while (1);
   }
 
-  // attach ISR di pin 0, trigger FALLING edge
+  // Pasang ISR pada GPIO 0 (misalnya tombol ditekan ke GND)
+  pinMode(0, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(0), isrHandler, FALLING);
 
-  // buat task untuk handle data dari ISR
+  // Task blink LED (indikator scheduler normal)
   xTaskCreatePinnedToCore(
-    vTaskHandler,    // fungsi task
-    "TaskHandler",   // nama task
-    4096,            // stack size
-    NULL,            // parameter
-    2,               // prioritas task
-    NULL,            // task handle
-    1                // core (pakai core 1)
+    vTaskBlink,
+    "TaskBlink",
+    2048,
+    NULL,
+    1,
+    NULL,
+    1
+  );
+
+  // Task handler interrupt
+  xTaskCreatePinnedToCore(
+    vTaskHandler,
+    "TaskHandler",
+    4096,
+    NULL,
+    2,
+    NULL,
+    1
   );
 }
 
 void loop() {
-  // kosong, semua kerja di task
+  // kosong, semua kerja ada di task
 }
