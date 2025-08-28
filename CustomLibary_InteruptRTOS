@@ -1,0 +1,81 @@
+#include <Arduino.h>
+#include <Navy_package.h>
+
+Navy_package Navy(37);
+
+// handle task
+TaskHandle_t TaskLED;
+TaskHandle_t TaskOLED;
+TaskHandle_t TaskLoRa;
+
+// Button pin
+#define BTN_PIN 0  
+
+// flag dari interrupt
+volatile bool ledForceOff = false;
+
+// ISR tombol
+void IRAM_ATTR handleButton() {
+  if (digitalRead(BTN_PIN) == LOW) {
+    // tombol ditekan
+    ledForceOff = true;
+  } else {
+    // tombol dilepas
+    ledForceOff = false;
+  }
+}
+
+// Task LED 
+void taskLed(void *pvParameters) {
+  Navy.beginLED();
+  for(;;) {
+    if (ledForceOff) {
+      Navy.ledOff();   // paksa mati kalau tombol ditekan
+    } else {
+      Navy.ledToggle();  // kalau tidak ditekan, toggle
+    }
+    vTaskDelay(500 / portTICK_PERIOD_MS);
+  }
+}
+
+// Task OLED
+void taskOLED(void *pvParameters) {
+  Navy.beginDisplay();
+  for(;;) {
+    if (ledForceOff) {
+      Navy.showMessage("LED OFF (Interrupt)");
+    } else {
+      Navy.showMessage("SYSTEM OKEEE");
+    }
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+  }
+}
+
+// Task LoRa
+void taskLoRa(void *pvParameters) {
+  Navy.beginLoRa(915E6);
+  for(;;) {
+    if (ledForceOff) {
+      Navy.sendLoRa("LED OFF by Interrupt!");
+    } else {
+      Navy.sendLoRa("Pesan dari RTOS Task!");
+    }
+    vTaskDelay(5000 / portTICK_PERIOD_MS);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  // button setup
+  pinMode(BTN_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(BTN_PIN), handleButton, CHANGE);
+
+  // Task RTOS
+  xTaskCreatePinnedToCore(taskLed,  "TaskLED",  2048, NULL, 1, &TaskLED, 1);
+  xTaskCreatePinnedToCore(taskOLED, "TaskOLED", 4096, NULL, 1, &TaskOLED, 1);
+  xTaskCreatePinnedToCore(taskLoRa, "TaskLoRa", 4096, NULL, 1, &TaskLoRa, 1);
+}
+
+void loop() {
+}
