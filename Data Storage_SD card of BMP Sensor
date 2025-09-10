@@ -1,0 +1,83 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include <SPI.h>
+#include <SD.h>
+#include <Adafruit_BMP3XX.h>
+
+// Pin SD card untuk LilyGO T3-S3 (ubah sesuai boardmu)
+#define SD_CS   13
+#define SD_MOSI 11
+#define SD_MISO 2
+#define SD_SCK  14
+
+// SPI object khusus untuk SD card
+SPIClass spiSD(FSPI);
+
+// Objek sensor BMP390
+Adafruit_BMP3XX bmp;
+
+// File untuk SD card
+File dataFile;
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  // --- Inisialisasi I2C & sensor BMP390 ---
+  if (!bmp.begin_I2C()) {  
+    Serial.println("BMP390 not found!");
+    while (1);
+  }
+  bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_8X);
+  bmp.setPressureOversampling(BMP3_OVERSAMPLING_4X);
+  bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_3);
+
+  // --- Inisialisasi SD card ---
+  spiSD.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+  if (!SD.begin(SD_CS, spiSD)) {
+    Serial.println("SD Card Mount Failed");
+    while (1);
+  }
+  Serial.println("SD Card initialized.");
+
+  // Buat / buka file CSV untuk logging
+  dataFile = SD.open("/data.csv", FILE_APPEND);
+  if (dataFile) {
+    // Kalau baru dibuat, tambahkan header kolom
+    if (dataFile.size() == 0) {
+      dataFile.println("Temperature,Pressure,Altitude");
+    }
+    dataFile.close();
+  }
+}
+
+void loop() {
+  // Baca data sensor
+  if (!bmp.performReading()) {
+    Serial.println("Failed to read BMP390");
+    return;
+  }
+
+  float temperature = bmp.temperature;   // °C
+  float pressure    = bmp.pressure / 100.0; // hPa
+  float altitude    = bmp.readAltitude(1013.25); // m (butuh tekanan referensi)
+
+  // Cetak ke Serial Monitor
+  Serial.print("T = "); Serial.print(temperature); Serial.print(" °C, ");
+  Serial.print("P = "); Serial.print(pressure); Serial.print(" hPa, ");
+  Serial.print("Alt = "); Serial.print(altitude); Serial.println(" m");
+
+  // Simpan ke SD card (append baris baru ke file CSV)
+  dataFile = SD.open("/data.csv", FILE_APPEND);
+  if (dataFile) {
+    dataFile.print(temperature); dataFile.print(",");
+    dataFile.print(pressure);    dataFile.print(",");
+    dataFile.println(altitude);
+    dataFile.close();
+    Serial.println("Data saved.");
+  } else {
+    Serial.println("Failed to open file for writing.");
+  }
+
+  delay(2000); // baca setiap 2 detik
+}
