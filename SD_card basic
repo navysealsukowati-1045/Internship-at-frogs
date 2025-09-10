@@ -1,0 +1,62 @@
+#include <Arduino.h>
+#include <SPI.h>
+#include <SD.h>
+
+// Pin definitions for LilyGO T3-S3 SD card
+#define SD_CS   13
+#define SD_MOSI 11
+#define SD_MISO 2
+#define SD_SCK  14
+
+//Create SPI object for SD card (FSPI bus on ESP32-S3)
+SPIClass spiSD(FSPI);
+
+void setup(){
+  
+  Serial.begin(115200);
+  delay(1000);
+
+  // Init custom SPI
+  spiSD.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+
+  // Mount SD card
+  if (!SD.begin(SD_CS, spiSD)) {
+    Serial.println("SD Card Mount Failed");
+    return;
+  }
+  Serial.println("SD Card initialized.");
+
+  // Write a file
+  File file = SD.open("/mydata.txt", FILE_WRITE);
+  if (file) {
+    file.println("Hello from LilyGO T3-S3!");
+    file.close();
+    Serial.println("File written.");
+  } else {
+    Serial.println("Failed to open file for writing.");
+  }
+
+  // Read the file
+  file = SD.open("/mydata.txt");
+  if (file) {
+    Serial.println("File content:");
+    while (file.available()) {
+      Serial.write(file.read());
+    }
+    file.close();
+    Serial.println();
+  } else {
+    Serial.println("Failed to open file for reading.");
+  }
+
+  // Delete the file
+  if (SD.remove("/mydata.txt")) {
+    Serial.println("File deleted.");
+  } else {
+    Serial.println("Delete failed.");
+  }
+}
+
+void loop(){
+  // nothing here
+}
