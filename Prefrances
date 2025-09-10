@@ -1,0 +1,38 @@
+#include <Arduino.h>
+#include <Preferences.h>
+
+Preferences prefs;
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  prefs.begin("storage", false);
+
+  // Ambil counter terakhir
+  int counter = prefs.getInt("counter", 0);
+  counter++;
+  prefs.putInt("counter", counter);
+
+  // Simpan flag & name kalau belum ada
+  prefs.putBool("flag", true);
+  prefs.putString("name", "LilyGO");
+
+  prefs.end();
+}
+
+void loop() {
+  prefs.begin("storage", true);  // read-only
+  int counter = prefs.getInt("counter", 0);
+  bool flag   = prefs.getBool("flag", false);
+  String name = prefs.getString("name", "NA");
+  prefs.end();
+
+  Serial.println("== Data dari Preferences ==");
+  Serial.printf("Counter: %d\n", counter);
+  Serial.printf("Flag: %s\n", flag ? "true" : "false");
+  Serial.printf("Name: %s\n", name.c_str());
+  Serial.println();
+
+  delay(2000);  // tampilkan setiap 2 detik
+}
