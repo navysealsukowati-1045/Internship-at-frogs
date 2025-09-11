@@ -1,0 +1,133 @@
+#include <Arduino.h>
+#include "ConfigManager.h"
+#include <Navy_package.h>
+
+// CONFIG MANAGER 
+ConfigSchema animalSchema[] = {
+  {"Jenis", "string", "Jerapah"},
+  {"Berat", "int", "100"},
+  {"Tinggi", "float", "3.8"},
+  {"Validasi", "bool", "0"}
+};
+ConfigManager animalConfig("animal", animalSchema, sizeof(animalSchema) / sizeof(animalSchema[0]));
+
+ConfigSchema wifiSchema[] = {
+  {"SSID", "string", "MyWiFi"},
+  {"Password", "string", "12345678"},
+  {"Enabled", "bool", "1"}
+};
+ConfigManager wifiConfig("wifi", wifiSchema, sizeof(wifiSchema) / sizeof(wifiSchema[0]));
+
+//Custom Library
+Navy_package Navy(37);
+
+// Button pin
+#define BTN_PIN 0  
+volatile bool ledForceOff = false;
+
+// ISR tombol
+void IRAM_ATTR handleButton() {
+  if (digitalRead(BTN_PIN) == LOW) {
+    ledForceOff = true;
+  } else {
+    ledForceOff = false;
+  }
+}
+
+// RTOS
+TaskHandle_t TaskAnimal;
+TaskHandle_t TaskWiFi;
+TaskHandle_t TaskLED;
+TaskHandle_t TaskOLED;
+TaskHandle_t TaskLoRa;
+
+//Task Prefences
+void taskAnimalConfig(void *pvParameters) {
+  for (;;) {
+    Serial.println("\n=== Animal Config Task ===");
+
+    animalConfig.begin();
+    animalConfig.printConfig();
+    animalConfig.saveInt("Berat", 120);
+    animalConfig.saveBool("Validasi", true);
+    Serial.println("== After Update (Animal) ==");
+    animalConfig.printConfig();
+    animalConfig.end();
+
+    vTaskDelay(5000 / portTICK_PERIOD_MS);
+  }
+}
+
+//Task Navy
+void taskWiFiConfig(void *pvParameters) {
+  for (;;) {
+    Serial.println("\n=== WiFi Config Task ===");
+
+    wifiConfig.begin();
+    wifiConfig.printConfig();
+    wifiConfig.save("SSID", "RumahKu");
+    wifiConfig.saveBool("Enabled", false);
+    Serial.println("== After Update (WiFi) ==");
+    wifiConfig.printConfig();
+    wifiConfig.end();
+
+    vTaskDelay(7000 / portTICK_PERIOD_MS);
+  }
+}
+
+//Task Navy
+void taskLed(void *pvParameters) {
+  Navy.beginLED();
+  for(;;) {
+    if (ledForceOff) {
+      Navy.ledOff();
+    } else {
+      Navy.ledToggle();
+    }
+    vTaskDelay(500 / portTICK_PERIOD_MS);
+  }
+}
+
+void taskOLED(void *pvParameters) {
+  Navy.beginDisplay();
+  for(;;) {
+    if (ledForceOff) {
+      Navy.showMessage("LED OFF (Interrupt)");
+    } else {
+      Navy.showMessage("SYSTEM OKEEE");
+    }
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+  }
+}
+
+void taskLoRa(void *pvParameters) {
+  Navy.beginLoRa(915E6);
+  for(;;) {
+    if (ledForceOff) {
+      Navy.sendLoRa("LED OFF by Interrupt!");
+    } else {
+      Navy.sendLoRa("Pesan dari RTOS Task!");
+    }
+    vTaskDelay(5000 / portTICK_PERIOD_MS);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  // Button
+  pinMode(BTN_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(BTN_PIN), handleButton, CHANGE);
+
+  // Task Config
+  xTaskCreatePinnedToCore(taskAnimalConfig, "TaskAnimal", 4096, NULL, 1, &TaskAnimal, 1);
+  xTaskCreatePinnedToCore(taskWiFiConfig,  "TaskWiFi",   4096, NULL, 1, &TaskWiFi,  1);
+
+  // Task Navy
+  xTaskCreatePinnedToCore(taskLed,  "TaskLED",  2048, NULL, 1, &TaskLED, 1);
+  xTaskCreatePinnedToCore(taskOLED, "TaskOLED", 4096, NULL, 1, &TaskOLED, 1);
+  xTaskCreatePinnedToCore(taskLoRa, "TaskLoRa", 4096, NULL, 1, &TaskLoRa, 1);
+}
+
+void loop() {
+}
