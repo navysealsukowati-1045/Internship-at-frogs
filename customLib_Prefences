@@ -1,0 +1,44 @@
+#include <Arduino.h>
+#include "ConfigManager.h"
+
+// Schema untuk config hewan
+ConfigSchema animalSchema[] = {
+  {"Jenis", "string", "Jerapah"},
+  {"Berat", "int", "100"},
+  {"Tinggi", "float", "3.8"},
+  {"Validasi", "bool", "0"}
+};
+ConfigManager animalConfig("animal", animalSchema, sizeof(animalSchema) / sizeof(animalSchema[0]));
+
+// Schema untuk WiFi
+ConfigSchema wifiSchema[] = {
+  {"SSID", "string", "MyWiFi"},
+  {"Password", "string", "12345678"},
+  {"Enabled", "bool", "1"}
+};
+ConfigManager wifiConfig("wifi", wifiSchema, sizeof(wifiSchema) / sizeof(wifiSchema[0]));
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  // Animal
+  animalConfig.begin();
+  animalConfig.printConfig();
+  animalConfig.saveInt("Berat", 120);
+  animalConfig.saveBool("Validasi", true);
+  Serial.println("== After Update (Animal) ==");
+  animalConfig.printConfig();
+  animalConfig.end();
+
+  // WiFi
+  wifiConfig.begin();
+  wifiConfig.printConfig();
+  wifiConfig.save("SSID", "RumahKu");
+  wifiConfig.saveBool("Enabled", false);
+  Serial.println("== After Update (WiFi) ==");
+  wifiConfig.printConfig();
+  wifiConfig.end();
+}
+
+void loop() {}
