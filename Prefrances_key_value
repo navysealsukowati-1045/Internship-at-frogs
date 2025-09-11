@@ -1,0 +1,57 @@
+#include <Arduino.h>
+#include <Preferences.h>
+
+Preferences prefs;
+
+// Definisi key-value (schema) seperti dictionary
+struct ConfigSchema {
+  const char* key;
+  const char* type;   // hanya untuk dokumentasi
+  const char* defaultValue;
+};
+
+// Daftar key yang dipakai
+ConfigSchema configList[] = {
+  {"volume", "int", "50"},
+  {"brightness", "int", "80"},
+  {"wifi_enabled", "bool", "1"},
+  {"device_name", "string", "LilyGO_T3S3"}
+};
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  prefs.begin("config", false);
+
+  Serial.println("== Load Config ==");
+
+  // Loop semua key yang sudah didefinisikan
+  for (int i = 0; i < sizeof(configList) / sizeof(configList[0]); i++) {
+    String key = configList[i].key;
+    String type = configList[i].type;
+    String defVal = configList[i].defaultValue;
+
+    if (type == "int") {
+      int val = prefs.getInt(key.c_str(), defVal.toInt());
+      Serial.printf("%s = %d\n", key.c_str(), val);
+    } else if (type == "bool") {
+      bool val = prefs.getBool(key.c_str(), defVal.toInt() > 0);
+      Serial.printf("%s = %s\n", key.c_str(), val ? "true" : "false");
+    } else if (type == "string") {
+      String val = prefs.getString(key.c_str(), defVal);
+      Serial.printf("%s = %s\n", key.c_str(), val.c_str());
+    }
+  }
+
+  // Contoh update value
+  prefs.putInt("volume", 75);
+  prefs.putInt("volume", 95);
+  prefs.putString("device_name", "My_T3S3");
+
+  prefs.end();
+}
+
+void loop() {
+  // kosong
+}
