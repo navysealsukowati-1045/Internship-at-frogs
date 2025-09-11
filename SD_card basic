@@ -27,9 +27,9 @@ void setup(){
   Serial.println("SD Card initialized.");
 
   // Write a file
-  File file = SD.open("/mydata.txt", FILE_WRITE);
+  File file = SD.open("/intern", FILE_WRITE);
   if (file) {
-    file.println("Hello from LilyGO T3-S3!");
+    file.println("Bonjour, Good Luck!");
     file.close();
     Serial.println("File written.");
   } else {
@@ -37,7 +37,7 @@ void setup(){
   }
 
   // Read the file
-  file = SD.open("/mydata.txt");
+  file = SD.open("/intern.txt");
   if (file) {
     Serial.println("File content:");
     while (file.available()) {
@@ -50,7 +50,7 @@ void setup(){
   }
 
   // Delete the file
-  if (SD.remove("/mydata.txt")) {
+  if (SD.remove("/intern.txt")) {
     Serial.println("File deleted.");
   } else {
     Serial.println("Delete failed.");
