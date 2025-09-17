@@ -1,0 +1,54 @@
+#define N 10   // ukuran window moving average
+
+float readings[N];  // buffer untuk simpan nilai
+int indexFilter = 0;
+float sum = 0;
+float average = 0;
+
+#define SENSOR_MIN 0
+#define SENSOR_MAX 100
+
+void initFilter() {
+  for (int i = 0; i < N; i++) {
+    readings[i] = 0;
+  }
+}
+
+float movingAverageFilter(float newValue) {
+  // Kurangi nilai lama dari jumlah total
+  sum -= readings[indexFilter];
+
+  // Simpan nilai baru ke buffer
+  readings[indexFilter] = newValue;
+
+  // Tambahkan nilai baru ke jumlah total
+  sum += newValue;
+
+  // Geser index (circular buffer)
+  indexFilter = (indexFilter + 1) % N;
+
+  // Hitung rata-rata
+  average = sum / N;
+  return average;
+}
+
+void setup() {
+  Serial.begin(115200);
+  initFilter();
+  randomSeed(analogRead(0));  // seed random dari pin analog
+}
+
+void loop() {
+  // Simulasi data random antara 0 - 120
+  float rawValue = random(0, 120);
+
+  float filteredValue = movingAverageFilter(rawValue);
+
+  // Validasi terhadap datasheet sensor
+  if (filteredValue < SENSOR_MIN) filteredValue = SENSOR_MIN;
+  if (filteredValue > SENSOR_MAX) filteredValue = SENSOR_MAX;
+
+  Serial.printf("Raw: %.2f | Filtered (MA): %.2f\n", rawValue, filteredValue);
+
+  delay(200);  // jeda biar mudah dibaca di serial monitor
+}
