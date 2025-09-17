@@ -1,0 +1,58 @@
+#include <Arduino.h>
+#include <RadioLib.h>
+
+// Pin mapping LilyGo T3-S3 SX1262
+#define NSS    7
+#define RST    8
+#define DIO1   33
+#define BUSY   34
+#define SCK    5
+#define MISO   3
+#define MOSI   6
+
+// Gunakan HSPI
+SPIClass spiLoRa(HSPI);
+SX1262 radio = new Module(NSS, DIO1, RST, BUSY, spiLoRa);
+
+String inputMsg = "";  // buffer untuk pesan dari Serial
+
+void setup() {
+  Serial.begin(115200);
+  delay(1500);
+  Serial.println("LoRa Transmitter - LilyGo T3-S3");
+  Serial.println("Ketik pesan lalu tekan Enter untuk kirim!");
+
+  spiLoRa.begin(SCK, MISO, MOSI, NSS);
+
+  int state = radio.begin();
+  if (state != RADIOLIB_ERR_NONE) {
+    Serial.print("LoRa init failed, code ");
+    Serial.println(state);
+    while (true);
+  }
+  Serial.println("LoRa init success!");
+}
+
+void loop() {
+  // Cek apakah ada input dari Serial Monitor
+  if (Serial.available()) {
+    inputMsg = Serial.readStringUntil('\n');  // baca sampai Enter ditekan
+
+    // Hilangkan newline/carriage return
+    inputMsg.trim();
+
+    if (inputMsg.length() > 0) {
+      Serial.print("Mengirim: ");
+      Serial.println(inputMsg);
+
+      int state = radio.transmit(inputMsg);
+
+      if (state == RADIOLIB_ERR_NONE) {
+        Serial.println("Packet sent successfully!");
+      } else {
+        Serial.print("Transmit failed, code ");
+        Serial.println(state);
+      }
+    }
+  }
+}
