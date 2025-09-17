@@ -1,0 +1,128 @@
+#include <U8g2lib.h>
+#include <Wire.h>
+
+// OLED via U8G2 (I2C)
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(
+  U8G2_R0, /* reset=*/U8X8_PIN_NONE, /* scl=*/17, /* sda=*/18);
+
+// Stack size
+#define STACK_SIZE 4096   // agak diperbesar biar aman
+
+// Task handles
+TaskHandle_t task_oled_handle;
+TaskHandle_t task_lpf_handle;
+
+// Memory usage
+size_t heap_start;
+UBaseType_t stack_free_oled, stack_free_lpf;
+
+// ================== Moving Average Filter ==================
+#define N 10   // ukuran window moving average
+
+float readings[N];  // buffer untuk simpan nilai
+int indexFilter = 0;
+float sum = 0;
+float average = 0;
+
+#define SENSOR_MIN 0
+#define SENSOR_MAX 100
+
+void initFilter() {
+  for (int i = 0; i < N; i++) {
+    readings[i] = 0;
+  }
+}
+
+float movingAverageFilter(float newValue) {
+  sum -= readings[indexFilter];
+  readings[indexFilter] = newValue;
+  sum += newValue;
+  indexFilter = (indexFilter + 1) % N;
+  average = sum / N;
+  return average;
+}
+
+// ================== Task OLED ==================
+void task_oled(void *pv_parameters) {
+  u8g2.begin();
+
+  while (1) {
+    stack_free_oled = uxTaskGetStackHighWaterMark(NULL);
+    size_t heap_free = esp_get_free_heap_size();
+    size_t heap_used = heap_start - heap_free;
+
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_5x8_tr);
+    u8g2.setCursor(0, 10);
+    u8g2.print("OLED Stack Free:");
+    u8g2.print(stack_free_oled * 4);
+    u8g2.setCursor(0, 20);
+    u8g2.print("LPF Stack Free:");
+    u8g2.print(stack_free_lpf * 4);
+    u8g2.setCursor(0, 30);
+    u8g2.print("Heap Used:");
+    u8g2.print(heap_used);
+    u8g2.setCursor(0, 40);
+    u8g2.print("Heap Free:");
+    u8g2.print(heap_free);
+    u8g2.sendBuffer();
+
+    vTaskDelay(pdMS_TO_TICKS(1000));
+  }
+}
+
+// ================== Task LPF (Moving Average) ==================
+void task_lpf(void *pv_parameters) {
+  initFilter();
+
+  while (1) {
+    stack_free_lpf = uxTaskGetStackHighWaterMark(NULL);
+
+    // Simulasi data random sensor 0 - 120
+    float rawValue = random(0, 120);
+    float filteredValue = movingAverageFilter(rawValue);
+
+    // Validasi range sesuai datasheet
+    if (filteredValue < SENSOR_MIN) filteredValue = SENSOR_MIN;
+    if (filteredValue > SENSOR_MAX) filteredValue = SENSOR_MAX;
+
+    Serial.printf("Raw: %.2f | Filtered (MA): %.2f\n", rawValue, filteredValue);
+
+    vTaskDelay(pdMS_TO_TICKS(200)); // delay 200 ms
+  }
+}
+
+// ================== Setup ==================
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  heap_start = esp_get_free_heap_size();
+
+  // Seed random generator
+  randomSeed(analogRead(0));
+
+  // OLED task
+  xTaskCreatePinnedToCore(
+    task_oled,
+    "oled_task",
+    STACK_SIZE,
+    NULL,
+    1,
+    &task_oled_handle,
+    0);
+
+  // LPF task
+  xTaskCreatePinnedToCore(
+    task_lpf,
+    "lpf_task",
+    STACK_SIZE,
+    NULL,
+    2,   // lebih tinggi dari OLED biar pasti jalan
+    &task_lpf_handle,
+    1);
+}
+
+void loop() {
+  // kosong, semua kerja di FreeRTOS tasks
+}
