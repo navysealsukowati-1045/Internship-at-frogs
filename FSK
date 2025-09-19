@@ -1,0 +1,46 @@
+#include <RadioLib.h>
+
+#define LORA_NSS   7
+#define LORA_RST   8
+#define LORA_DIO1  33
+#define LORA_BUSY  34
+#define LORA_SCK   5
+#define LORA_MISO  3
+#define LORA_MOSI  6
+
+SPIClass spiLoRa(FSPI);
+SX1262 radio = new Module(LORA_NSS, LORA_DIO1, LORA_RST, LORA_BUSY, spiLoRa);
+
+void setup() {
+  Serial.begin(115200);
+  delay(1500);
+
+  spiLoRa.begin(LORA_SCK, LORA_MISO, LORA_MOSI, LORA_NSS);
+
+  // Inisialisasi di mode FSK
+  Serial.print("[FSK] Initializing ... ");
+  int state = radio.beginFSK(434.0, 48.0, 50.0, 125.0, 10, 32);
+  // param: freq, bitrate[kbps], freqDev[kHz], rxBw[kHz], preambleLen, syncWordLen
+
+  if (state == RADIOLIB_ERR_NONE) {
+    Serial.println("success!");
+  } else {
+    Serial.print("failed, code ");
+    Serial.println(state);
+    while (true);
+  }
+}
+
+void loop() {
+  Serial.print("[FSK] Sending packet ... ");
+  int state = radio.transmit("Hello FSK");
+
+  if (state == RADIOLIB_ERR_NONE) {
+    Serial.println("success!");
+  } else {
+    Serial.print("failed, code ");
+    Serial.println(state);
+  }
+
+  delay(2000);
+}
