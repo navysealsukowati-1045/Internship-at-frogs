@@ -1,0 +1,62 @@
+// LR-FHSS TX example for LilyGO T3-S3 (SX1262) using RadioLib
+// Pin mapping (user provided)
+#define LORA_NSS   7
+#define LORA_RST   8
+#define LORA_DIO1  33
+#define LORA_BUSY  34
+#define LORA_SCK   5
+#define LORA_MISO  3
+#define LORA_MOSI  6
+
+#include <RadioLib.h>
+
+SPIClass spiLoRa(FSPI);
+SX1262 radio = new Module(LORA_NSS, LORA_DIO1, LORA_RST, LORA_BUSY, spiLoRa);
+
+// --- LR-FHSS parameters (sesuaikan) ---
+// freq: center frequency in MHz (example: 857.125)
+// bw: effective bandwidth/parameter expected by RadioLib (check doc / region profile)
+// coding: coding parameter (library-dependent)
+// modulationIndex: modulation index or other param (library-dependent)
+const float LR_FREQ_MHZ = 857.125;   // contoh: 857.125 MHz (sesuaikan/regulasi)
+const float LR_BW = 1523.0;          // contoh value; cek RadioLib untuk makna tepatnya
+const int   LR_CODING = 1;           // contoh value; lihat dokumentasi RadioLib
+const float LR_MODINDEX = 1.0;       // contoh value
+
+void setup() {
+  Serial.begin(115200);
+  delay(1500);
+
+  // init SPI pins for SPIClass instance
+  spiLoRa.begin(LORA_SCK, LORA_MISO, LORA_MOSI, LORA_NSS);
+
+  Serial.print("[LR-FHSS TX] Initializing... ");
+  int state = radio.beginLRFHSS(LR_FREQ_MHZ, LR_BW, LR_CODING, LR_MODINDEX);
+  if (state == RADIOLIB_ERR_NONE) {
+    Serial.println("OK");
+    // Optional: adjust TX power if needed (dalam dBm)
+    // radio.setOutputPower(14);
+  } else {
+    Serial.print("failed, code ");
+    Serial.println(state);
+    while (true) { delay(1000); } // stop — check wiring/params
+  }
+}
+
+void loop() {
+  // contoh payload
+  String payload = "Hello LR-FHSS from T3-S3";
+
+  Serial.print("[LR-FHSS TX] Transmitting: ");
+  Serial.println(payload);
+
+  int state = radio.transmit(payload);
+  if (state == RADIOLIB_ERR_NONE) {
+    Serial.println("[LR-FHSS TX] Transmission successful");
+  } else {
+    Serial.print("[LR-FHSS TX] Transmit failed, code ");
+    Serial.println(state);
+  }
+
+  delay(2000); // jarak antar pengiriman — sesuaikan kebutuhan dan duty cycle
+}
