@@ -1,0 +1,39 @@
+#include <Adafruit_BMP3XX.h>
+#include <SPI.h>
+
+// ====== PIN SPI (FSPI group LilyGO T3-S3) ======
+#define BMP_CS    38
+#define BMP_SCK   36
+#define BMP_MISO  37
+#define BMP_MOSI  35
+
+Adafruit_BMP3XX bmp(BMP_CS, BMP_MOSI, BMP_MISO, BMP_SCK);
+
+void setup() {
+  Serial.begin(115200);
+  if (!bmp.begin_SPI(BMP_CS, BMP_SCK, BMP_MISO, BMP_MOSI)) {
+    Serial.println("Could not find a valid BMP390 sensor, check wiring!");
+    while (1);
+  }
+  Serial.println("BMP390L Found!");
+}
+
+void loop() {
+  if (!bmp.performReading()) {
+    Serial.println("Failed to perform reading :(");
+    return;
+  }
+  Serial.print("Temperature = ");
+  Serial.print(bmp.temperature);
+  Serial.println(" *C");
+
+  Serial.print("Pressure = ");
+  Serial.print(bmp.pressure / 100.0);
+  Serial.println(" hPa");
+
+  Serial.print("Approx. Altitude = ");
+  Serial.print(bmp.readAltitude(1013.25));
+  Serial.println(" m");
+
+  delay(1000);
+}
