@@ -1,39 +1,47 @@
 #include <Adafruit_BMP3XX.h>
 #include <SPI.h>
 
-// ====== PIN SPI (FSPI group LilyGO T3-S3) ======
-#define BMP_CS    38
-#define BMP_SCK   36
-#define BMP_MISO  37
-#define BMP_MOSI  35
+// Pin SPI FSPI bus
+#define BMP_CS   38   // chip select BMP390L (bisa juga 34, 36, dll)
+#define BMP_SCK  36
+#define BMP_MISO 37
+#define BMP_MOSI 35
 
-Adafruit_BMP3XX bmp(BMP_CS, BMP_MOSI, BMP_MISO, BMP_SCK);
+Adafruit_BMP3XX bmp;  // pakai constructor kosong
 
 void setup() {
   Serial.begin(115200);
+  delay(1000);
+
+  Serial.println("Init BMP390L...");
+
+  // Gunakan begin_SPI() untuk inisialisasi
   if (!bmp.begin_SPI(BMP_CS, BMP_SCK, BMP_MISO, BMP_MOSI)) {
-    Serial.println("Could not find a valid BMP390 sensor, check wiring!");
+    Serial.println("BMP390L not found, check wiring!");
     while (1);
   }
-  Serial.println("BMP390L Found!");
+
+  Serial.println("BMP390L ready on FSPI bus!");
 }
 
 void loop() {
   if (!bmp.performReading()) {
-    Serial.println("Failed to perform reading :(");
+    Serial.println("Failed to read sensor!");
+    delay(200);
     return;
   }
-  Serial.print("Temperature = ");
+
+  Serial.print("Temp: ");
   Serial.print(bmp.temperature);
-  Serial.println(" *C");
+  Serial.print(" °C  ");
 
-  Serial.print("Pressure = ");
+  Serial.print("Pressure: ");
   Serial.print(bmp.pressure / 100.0);
-  Serial.println(" hPa");
+  Serial.print(" hPa  ");
 
-  Serial.print("Approx. Altitude = ");
-  Serial.print(bmp.readAltitude(1013.25));
+  Serial.print("Altitude: ");
+  Serial.print(bmp.readAltitude(1013.25)); // ganti dengan tekanan lokal
   Serial.println(" m");
 
-  delay(1000);
+  delay(500);
 }
