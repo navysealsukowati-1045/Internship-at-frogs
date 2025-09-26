@@ -1,0 +1,139 @@
+#include <Arduino.h>
+#include <SPI.h>
+#include <Adafruit_BMP3XX.h>
+
+#define BMP_CS    38
+#define BMP_SCK   36
+#define BMP_MISO  37
+#define BMP_MOSI  35
+
+// Sampling & Filter 
+#define SAMPLE_HZ     25          // frekuensi baca sensor
+#define MA_WINDOW     8           // moving average window
+#define LPF_ALPHA     0.20f       // 0..1 (lebih kecil = lebih halus)
+
+// RTOS 
+TaskHandle_t taskSensorHandle = nullptr;
+TaskHandle_t taskLoggerHandle = nullptr;
+QueueHandle_t qData;                          // antar-task
+SemaphoreHandle_t xSerialMutex;               // proteksi Serial
+
+// Sensor & Filter 
+Adafruit_BMP3XX bmp;
+float groundPressure_hPa = 1013.25f;          // baseline dalam hPa → dipakai untuk altitude
+
+float maBuf[MA_WINDOW] = {0};
+int   maIdx = 0, maCount = 0;
+float lpfPrev = NAN;
+
+struct Sample {
+  uint32_t ts_ms;
+  float temp_C;
+  float press_Pa;        // sekarang pakai Pa
+  float alt_rel_raw_m;
+  float alt_rel_filt_m;
+};
+
+// Utils: filters 
+static inline float movingAverage(float x) {
+  maBuf[maIdx] = x;
+  maIdx = (maIdx + 1) % MA_WINDOW;
+  if (maCount < MA_WINDOW) maCount++;
+  float sum = 0.0f;
+  for (int i = 0; i < maCount; i++) sum += maBuf[i];
+  return sum / (float)maCount;
+}
+
+static inline float lowPass(float x) {
+  if (isnan(lpfPrev)) lpfPrev = x;
+  lpfPrev = lpfPrev + LPF_ALPHA * (x - lpfPrev);
+  return lpfPrev;
+}
+
+// Task Sensor
+void taskSensor(void* pv) {
+  if (!bmp.begin_SPI(BMP_CS, BMP_SCK, BMP_MISO, BMP_MOSI)) {
+    Serial.println("[ERR] BMP390L not found. Check wiring!");
+    vTaskDelete(NULL);
+  }
+
+  bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_8X);
+  bmp.setPressureOversampling(BMP3_OVERSAMPLING_16X);
+  bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_7);
+  bmp.setOutputDataRate(BMP3_ODR_25_HZ);
+
+  // Kalibrasi baseline (avg N sampel) 
+  const int Ncal = 40;   // ~1.6 s @ 25 Hz
+  float sum_Pa = 0;
+  for (int i = 0; i < Ncal; i++) {
+    if (bmp.performReading()) sum_Pa += bmp.pressure;   // Pa langsung
+    vTaskDelay(pdMS_TO_TICKS(1000 / SAMPLE_HZ));
+  }
+  groundPressure_hPa = (sum_Pa / Ncal) / 100.0f;        // simpan baseline dalam hPa
+
+  float alt_check = bmp.readAltitude(groundPressure_hPa);
+  if (fabsf(alt_check) > 10.0f) { // sanity check
+    groundPressure_hPa = bmp.pressure / 100.0f;
+  }
+
+  if (xSemaphoreTake(xSerialMutex, portMAX_DELAY)) {
+    Serial.printf("Baseline set: %.2f hPa (alt_check=%.2f m)\n",
+                  groundPressure_hPa, alt_check);
+    xSemaphoreGive(xSerialMutex);
+  }
+
+  const TickType_t period = pdMS_TO_TICKS(1000 / SAMPLE_HZ);
+  TickType_t lastWake = xTaskGetTickCount();
+
+  for (;;) {
+    vTaskDelayUntil(&lastWake, period);
+
+    if (!bmp.performReading()) continue;
+
+    float T  = bmp.temperature;
+    float P_Pa = bmp.pressure;                  // Pa langsung
+    float alt_raw = bmp.readAltitude(groundPressure_hPa);  // pakai baseline (hPa)
+
+    float alt_ma   = movingAverage(alt_raw);
+    float alt_filt = lowPass(alt_ma);
+
+    Sample s {
+      .ts_ms          = millis(),
+      .temp_C         = T,
+      .press_Pa       = P_Pa,
+      .alt_rel_raw_m  = alt_raw,
+      .alt_rel_filt_m = alt_filt
+    };
+
+    xQueueOverwrite(qData, &s);
+  }
+}
+
+// Task: Logger 
+void taskLogger(void* pv) {
+  Sample s;
+  for (;;) {
+    if (xQueueReceive(qData, &s, portMAX_DELAY) == pdTRUE) {
+      if (xSemaphoreTake(xSerialMutex, portMAX_DELAY)) {
+        Serial.printf("[%lu ms] T=%.2f C  P=%.2f Pa  Alt(raw)=%.2f m  Alt(filt)=%.2f m\n",
+                      s.ts_ms, s.temp_C, s.press_Pa, s.alt_rel_raw_m, s.alt_rel_filt_m);
+        xSemaphoreGive(xSerialMutex);
+      }
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(300);
+
+  xSerialMutex = xSemaphoreCreateMutex();
+  qData = xQueueCreate(1, sizeof(Sample));
+
+  xTaskCreatePinnedToCore(taskSensor, "Sensor", 6144, NULL, 3, &taskSensorHandle, APP_CPU_NUM);
+  xTaskCreatePinnedToCore(taskLogger, "Logger", 4096, NULL, 1, &taskLoggerHandle, APP_CPU_NUM);
+}
+
+void loop() {
+  // semua kerja di task
+}
