@@ -1,0 +1,243 @@
+       #include <Arduino.h>
+#include <SPI.h>
+#include <Adafruit_BMP3XX.h>
+#include "Navy_package.h"     // OLED helper (I2C 0x3C)
+
+#define BMP_CS    38
+#define BMP_SCK   36
+#define BMP_MISO  37
+#define BMP_MOSI  35
+
+//Button / Interrupt
+#define BTN_PIN   0                 // BOOT button on LilyGO/ESP32-S3
+
+//  Sampling & Filter 
+#define SAMPLE_HZ     50
+#define MA_WINDOW     10
+#define LPF_ALPHA     0.25f
+
+// RTOS handles
+TaskHandle_t taskSensorHandle = nullptr;
+TaskHandle_t taskLoggerHandle = nullptr;
+TaskHandle_t taskOLEDHandle   = nullptr;
+TaskHandle_t taskBtnHandle    = nullptr;
+
+QueueHandle_t qAlt;                // latest altitude packet
+SemaphoreHandle_t xSerialMutex;
+
+//Timer (ESP32 core 3.x API)
+hw_timer_t* tim0 = nullptr;
+
+// Sensor / Filter
+Adafruit_BMP3XX bmp;
+float groundPressure_hPa = 1013.25f;
+
+float maBuf[MA_WINDOW] = {0};
+int   maIdx = 0, maCount = 0;
+float lpfPrev = NAN;
+
+// OLED helper
+Navy_package Navy(37);             
+
+//  Button ISR signaling
+volatile uint32_t btnLastEdgeMs = 0;
+volatile bool btnEdgeFlag = false;           // signal to taskBtn
+
+void IRAM_ATTR btnISR() {
+  btnEdgeFlag = true;
+}
+
+// Alt data packet 
+typedef struct {
+  uint32_t ts_ms;
+  float temperature_C;
+  float pressure_hPa;
+  float altitude_rel_m;   // filtered
+} AltPacket;
+
+//  Filters 
+static inline float movingAverage(float x) {
+  maBuf[maIdx] = x;
+  maIdx = (maIdx + 1) % MA_WINDOW;
+  if (maCount < MA_WINDOW) maCount++;
+  float sum = 0.0f;
+  for (int i = 0; i < maCount; i++) sum += maBuf[i];
+  return sum / (float)maCount;
+}
+static inline float lowPass(float x) {
+  if (isnan(lpfPrev)) lpfPrev = x;
+  lpfPrev = lpfPrev + LPF_ALPHA * (x - lpfPrev);
+  return lpfPrev;
+}
+
+//Utility: calibrate baseline (avg N samples) 
+static void calibrateBaseline(uint16_t N, uint16_t per_ms) {
+  float sum_hPa = 0;
+  uint16_t got = 0;
+  for (uint16_t i = 0; i < N; i++) {
+    if (bmp.performReading()) { sum_hPa += bmp.pressure / 100.0f; got++; }
+    vTaskDelay(pdMS_TO_TICKS(per_ms));
+  }
+  if (got) groundPressure_hPa = sum_hPa / got;
+  lpfPrev = NAN;            // reset software LPF
+  maIdx = maCount = 0;      // reset MA buffer
+}
+
+//  Timer ISR 
+void IRAM_ATTR onTimer() {
+  BaseType_t hpw = pdFALSE;
+  if (taskSensorHandle) vTaskNotifyGiveFromISR(taskSensorHandle, &hpw);
+  if (hpw == pdTRUE) portYIELD_FROM_ISR();
+}
+
+// Task: Sensor 
+void taskSensor(void* pv) {
+  if (!bmp.begin_SPI(BMP_CS, BMP_SCK, BMP_MISO, BMP_MOSI)) {
+    Serial.println("[ERR] BMP390L not found. Check wiring/pins.");
+    vTaskDelete(NULL);
+  }
+  bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_8X);
+  bmp.setPressureOversampling(BMP3_OVERSAMPLING_16X);
+  bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_7);
+  bmp.setOutputDataRate(BMP3_ODR_50_HZ);
+
+  vTaskDelay(pdMS_TO_TICKS(300));
+  calibrateBaseline(40, 20);  // ~0.8 s at 50 Hz
+
+  for (;;) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    if (!bmp.performReading()) continue;
+
+    float T = bmp.temperature;
+    float P = bmp.pressure / 100.0f;
+    float alt_raw = bmp.readAltitude(groundPressure_hPa);
+    float alt_f   = lowPass(movingAverage(alt_raw));
+
+    AltPacket pkt{ millis(), T, P, alt_f };
+    xQueueOverwrite(qAlt, &pkt);
+  }
+}
+
+//Task: Logger 
+void taskLogger(void* pv) {
+  AltPacket pkt;
+  for (;;) {
+    if (xQueueReceive(qAlt, &pkt, portMAX_DELAY) == pdTRUE) {
+      if (xSemaphoreTake(xSerialMutex, portMAX_DELAY)) {
+        Serial.printf("[%lu ms] T=%.2f C  P=%.2f hPa  Alt=%.2f m\n",
+                      pkt.ts_ms, pkt.temperature_C, pkt.pressure_hPa, pkt.altitude_rel_m);
+        xSemaphoreGive(xSerialMutex);
+      }
+    }
+  }
+}
+
+//Task: OLED (alt + memory usage) 
+void taskOLED(void* pv) {
+  Navy.beginDisplay();
+  AltPacket pkt{0,0,0,0};
+
+  for (;;) {
+    // non-blocking peek: if no new data, keep showing old
+    xQueueReceive(qAlt, &pkt, pdMS_TO_TICKS(50));
+
+    // Memory stats
+    size_t heapFree = esp_get_free_heap_size();  // bytes
+    // Stack watermark: min remaining words since task start
+    UBaseType_t hwSensor = uxTaskGetStackHighWaterMark(taskSensorHandle);
+    UBaseType_t hwLogger = uxTaskGetStackHighWaterMark(taskLoggerHandle);
+    UBaseType_t hwOLED   = uxTaskGetStackHighWaterMark(NULL); // self
+    // convert words to bytes (portSTACK_TYPE is 4 bytes on Xtensa)
+    size_t sSensor = hwSensor * sizeof(StackType_t);
+    size_t sLogger = hwLogger * sizeof(StackType_t);
+    size_t sOLED   = hwOLED   * sizeof(StackType_t);
+
+    char buf[120];
+    // keep it short to fit 128x64
+    snprintf(buf, sizeof(buf),
+      "Alt: %.2f m\nHeap: %u B\nStk S/L/O:\n%u/%u/%u B",
+      pkt.altitude_rel_m,
+      (unsigned)heapFree,
+      (unsigned)sSensor, (unsigned)sLogger, (unsigned)sOLED);
+
+    Navy.showMessage(buf);
+    vTaskDelay(pdMS_TO_TICKS(500));  // slow OLED refresh
+  }
+}
+
+//Task: Button handler (short/long press)
+void taskBtn(void* pv) {
+  const uint32_t LONG_MS = 2000;
+  const uint32_t DEBOUNCE = 30;
+
+  pinMode(BTN_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(BTN_PIN), btnISR, CHANGE);
+
+  bool lastLevel = digitalRead(BTN_PIN);
+  uint32_t pressStart = 0;
+
+  for (;;) {
+    if (!btnEdgeFlag) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
+    btnEdgeFlag = false;
+
+    bool lvl = digitalRead(BTN_PIN);
+    uint32_t now = millis();
+    if (now - btnLastEdgeMs < DEBOUNCE) continue; // debounce
+    btnLastEdgeMs = now;
+
+    if (lvl == LOW) {               // pressed
+      pressStart = now;
+    } else {                        // released
+      uint32_t dur = now - pressStart;
+      if (dur >= LONG_MS) {
+
+        //LONG PRESS: Deep Sleep
+        if (xSerialMutex && xSemaphoreTake(xSerialMutex, portMAX_DELAY)) {
+          Serial.println("Long press: entering Deep Sleep...");
+          xSemaphoreGive(xSerialMutex);
+        }
+
+        // stop timer before sleep
+        if (tim0) { timerDetachInterrupt(tim0); timerEnd(tim0); tim0 = nullptr; }
+
+        // Put OLED message
+        Navy.showMessage("Deep Sleep...\nPress BOOT to wake");
+
+        // setup wakeup on BTN (LOW)
+        esp_sleep_enable_ext0_wakeup((gpio_num_t)BTN_PIN, 0);
+        delay(100);
+        esp_deep_sleep_start();
+        // no return
+      } else {
+
+        //SHORT PRESS: Re-calibrate
+        if (xSerialMutex && xSemaphoreTake(xSerialMutex, portMAX_DELAY)) {
+          Serial.println("Short press: recalibrating baseline...");
+          xSemaphoreGive(xSerialMutex);
+        }
+        calibrateBaseline(30, 20);   // ~0.6 s
+      }
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(300);
+
+  xSerialMutex = xSemaphoreCreateMutex();
+  qAlt = xQueueCreate(1, sizeof(AltPacket));
+
+  xTaskCreatePinnedToCore(taskSensor, "Sensor", 6144, NULL, 3, &taskSensorHandle, APP_CPU_NUM);
+  xTaskCreatePinnedToCore(taskLogger, "Logger", 4096, NULL, 1, &taskLoggerHandle, APP_CPU_NUM);
+  xTaskCreatePinnedToCore(taskOLED,   "OLED",   4096, NULL, 1, &taskOLEDHandle,   APP_CPU_NUM);
+  xTaskCreatePinnedToCore(taskBtn,    "Button", 3072, NULL, 2, &taskBtnHandle,    APP_CPU_NUM);
+
+  // Timer 50 Hz (Core 3.x)
+  tim0 = timerBegin(SAMPLE_HZ);
+  timerAttachInterrupt(tim0, &onTimer);
+  timerAlarm(tim0, 1000000UL / SAMPLE_HZ, true, 0);  // period µs, autoreload
+
+}
+
+void loop() 
