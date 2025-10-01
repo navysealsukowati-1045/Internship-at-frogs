@@ -1,1 +1,204 @@
+#include <ESP32DMASPIMaster.h>
 
+ESP32DMASPI::Master master;
+
+// BMP390L Register Addresses
+#define BMP390_CHIP_ID          0x00
+#define BMP390_ERR_REG          0x02
+#define BMP390_STATUS           0x03
+#define BMP390_DATA_0           0x04  // Pressure data start
+#define BMP390_DATA_5           0x09  // Temperature data end
+#define BMP390_SENSORTIME_0     0x0C
+#define BMP390_EVENT            0x10
+#define BMP390_INT_STATUS       0x11
+#define BMP390_PWR_CTRL         0x1B
+#define BMP390_OSR              0x1C
+#define BMP390_ODR              0x1D
+#define BMP390_CONFIG           0x1F
+#define BMP390_CMD              0x7E
+
+// BMP390L Commands
+#define BMP390_SOFT_RESET       0xB6
+#define BMP390_CHIP_ID_VALUE    0x60
+
+// DMA Buffer sizes
+static constexpr size_t READ_BUFFER_SIZE = 16;  // untuk read multiple bytes
+static constexpr size_t QUEUE_SIZE = 1;
+
+uint8_t *dma_tx_buf;
+uint8_t *dma_rx_buf;
+
+// LilyGo T3-S3 SPI Pins (sesuaikan dengan board Anda)
+#define SPI_SCK   5
+#define SPI_MISO  3
+#define SPI_MOSI  6
+#define SPI_CS    7
+
+// Variables for sensor data
+struct BMP390Data {
+    uint32_t pressure_raw;
+    uint32_t temperature_raw;
+    float pressure_pa;
+    float temperature_c;
+};
+
+BMP390Data sensorData;
+
+// Fungsi untuk menulis register BMP390L
+void bmp390_write_register(uint8_t reg, uint8_t value) {
+    dma_tx_buf[0] = reg & 0x7F;  // MSB = 0 untuk write
+    dma_tx_buf[1] = value;
+    
+    master.transfer(dma_tx_buf, dma_rx_buf, 2);
+    delayMicroseconds(10);
+}
+
+// Fungsi untuk membaca register BMP390L
+uint8_t bmp390_read_register(uint8_t reg) {
+    dma_tx_buf[0] = reg | 0x80;  // MSB = 1 untuk read
+    dma_tx_buf[1] = 0x00;        // dummy byte
+    
+    master.transfer(dma_tx_buf, dma_rx_buf, 2);
+    return dma_rx_buf[1];
+}
+
+// Fungsi untuk membaca multiple bytes dengan DMA
+void bmp390_read_burst(uint8_t reg, uint8_t *data, size_t len) {
+    dma_tx_buf[0] = reg | 0x80;  // MSB = 1 untuk read
+    for (size_t i = 1; i <= len; i++) {
+        dma_tx_buf[i] = 0x00;  // dummy bytes
+    }
+    
+    // Queue DMA transaction
+    master.queue(dma_tx_buf, dma_rx_buf, len + 1);
+    master.trigger();
+    
+    // Wait for completion
+    while (master.numTransactionsInFlight() > 0) {
+        delayMicroseconds(1);
+    }
+    
+    // Ambil hasil (skip byte pertama karena dummy)
+    for (size_t i = 0; i < len; i++) {
+        data[i] = dma_rx_buf[i + 1];
+    }
+    
+    // Clear completed transaction
+    while (master.numTransactionsCompleted()) {
+        master.numBytesReceived();
+    }
+}
+
+// Inisialisasi BMP390L
+bool bmp390_init() {
+    Serial.println("Initializing BMP390L...");
+    
+    // Soft reset
+    bmp390_write_register(BMP390_CMD, BMP390_SOFT_RESET);
+    delay(10);
+    
+    // Cek Chip ID
+    uint8_t chip_id = bmp390_read_register(BMP390_CHIP_ID);
+    Serial.printf("Chip ID: 0x%02X (expected 0x60)\n", chip_id);
+    
+    if (chip_id != BMP390_CHIP_ID_VALUE) {
+        Serial.println("BMP390L not found!");
+        return false;
+    }
+    
+    // Configure sensor
+    // OSR settings: Pressure x8, Temperature x1
+    bmp390_write_register(BMP390_OSR, 0x03);
+    
+    // ODR: 50Hz
+    bmp390_write_register(BMP390_ODR, 0x05);
+    
+    // IIR Filter coefficient 3
+    bmp390_write_register(BMP390_CONFIG, 0x02);
+    
+    // Enable pressure and temperature, normal mode
+    bmp390_write_register(BMP390_PWR_CTRL, 0x33);
+    
+    delay(100);
+    
+    Serial.println("BMP390L initialized successfully!");
+    return true;
+}
+
+// Baca data sensor dengan DMA
+void bmp390_read_sensor_data() {
+    uint8_t raw_data[6];
+    
+    // Read burst: pressure (3 bytes) + temperature (3 bytes)
+    bmp390_read_burst(BMP390_DATA_0, raw_data, 6);
+    
+    // Parse pressure (24-bit)
+    sensorData.pressure_raw = (uint32_t)raw_data[2] << 16 | 
+                              (uint32_t)raw_data[1] << 8 | 
+                              raw_data[0];
+    
+    // Parse temperature (24-bit)
+    sensorData.temperature_raw = (uint32_t)raw_data[5] << 16 | 
+                                 (uint32_t)raw_data[4] << 8 | 
+                                 raw_data[3];
+    
+    // Konversi sederhana (untuk konversi akurat, gunakan calibration data)
+    // Ini hanya contoh, nilai sebenarnya memerlukan kompensasi dengan calibration coefficients
+    sensorData.temperature_c = (float)sensorData.temperature_raw / 100.0;
+    sensorData.pressure_pa = (float)sensorData.pressure_raw / 100.0;
+}
+
+void setup() {
+    Serial.begin(115200);
+    delay(2000);
+    
+    Serial.println("LilyGo T3-S3 - BMP390L DMA SPI Reader");
+    
+    // Alokasi DMA buffer
+    dma_tx_buf = master.allocDMABuffer(READ_BUFFER_SIZE);
+    dma_rx_buf = master.allocDMABuffer(READ_BUFFER_SIZE);
+    
+    // Konfigurasi SPI
+    master.setDataMode(SPI_MODE0);
+    master.setFrequency(1000000);  // 1MHz (BMP390L support up to 10MHz)
+    master.setMaxTransferSize(READ_BUFFER_SIZE);
+    master.setQueueSize(QUEUE_SIZE);
+    
+    // Mulai SPI dengan pin custom
+    master.begin(SPI_SCK, SPI_MISO, SPI_MOSI, SPI_CS);
+    
+    delay(100);
+    
+    // Inisialisasi sensor
+    if (!bmp390_init()) {
+        Serial.println("Failed to initialize BMP390L. Check wiring!");
+        while (1) {
+            delay(1000);
+        }
+    }
+    
+    Serial.println("\nStarting continuous reading...\n");
+}
+
+void loop() {
+    static uint32_t last_read = 0;
+    
+    // Baca setiap 100ms
+    if (millis() - last_read >= 100) {
+        // Baca data sensor menggunakan DMA
+        bmp390_read_sensor_data();
+        
+        // Tampilkan hasil
+        Serial.println("=== BMP390L Data ===");
+        Serial.printf("Pressure Raw   : %u\n", sensorData.pressure_raw);
+        Serial.printf("Temperature Raw: %u\n", sensorData.temperature_raw);
+        Serial.printf("Pressure (Pa)  : %.2f\n", sensorData.pressure_pa);
+        Serial.printf("Temperature (C): %.2f\n", sensorData.temperature_c);
+        Serial.println();
+        
+        last_read = millis();
+    }
+    
+    // Anda bisa melakukan task lain di sini
+    delay(10);
+}
