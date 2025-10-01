@@ -1,0 +1,97 @@
+#include <Adafruit_BMP3XX.h>
+#include <SPI.h>
+
+// Pin BMP390L (SPI)
+#define BMP_CS   38
+#define BMP_SCK  36
+#define BMP_MISO 37
+#define BMP_MOSI 35
+
+Adafruit_BMP3XX bmp;
+
+// Fungsi konversi tekanan -> ketinggian
+float pressureToAltitude(float pPa, float P0) {
+  return 44330.0f * (1.0f - powf(pPa / P0, 0.190294957f));
+}
+
+// ===== FIR Hamming Setup =====
+// Contoh koefisien Hamming window 15 tap (Fc ~2Hz @50Hz)
+#define NTAP 15
+const float h[NTAP] = {
+ 0.00636831, 0.01184721, 0.02732023, 0.0524037,  0.08314837, 0.11297744,
+ 0.13464889, 0.14257169, 0.13464889, 0.11297744, 0.0831483, 0.0524037,
+ 0.02732023, 0.01184721, 0.00636831
+};
+float xbuf[NTAP];
+int p = 0;
+
+float firProcess(float x) {
+  xbuf[p] = x;
+  float y = 0.0f;
+  int i = p;
+  for (int k = 0; k < NTAP; k++) {
+    y += h[k] * xbuf[i];
+    if (--i < 0) i = NTAP - 1;
+  }
+  if (++p >= NTAP) p = 0;
+  return y;
+}
+
+// Kalibrasi tekanan referensi (P0)
+float P0 = 101325.0;
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  if (!bmp.begin_SPI(BMP_CS, BMP_SCK, BMP_MISO, BMP_MOSI)) {
+    Serial.println("BMP390L not found, check wiring!");
+    while (1);
+  }
+
+  // Oversampling
+  bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_8X);
+  bmp.setPressureOversampling(BMP3_OVERSAMPLING_32X);
+
+  // Aktifkan IIR internal
+  bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_15);
+
+  // ODR ~50 Hz
+  bmp.setOutputDataRate(BMP3_ODR_50_HZ);
+
+  // ===== Kalibrasi P0 =====
+  float sumP = 0;
+  for (int i = 0; i < 100; i++) {
+    if (bmp.performReading()) {
+      sumP += bmp.pressure;
+    }
+    delay(20);
+  }
+  P0 = sumP / 100.0;
+  Serial.print("Calibrated P0 = "); Serial.print(P0); Serial.println(" Pa");
+}
+
+void loop() {
+  if (!bmp.performReading()) return;
+
+  // Data dasar
+  float T = bmp.temperature;   // Celsius
+  float P = bmp.pressure;      // Pascal
+  float alt_raw = pressureToAltitude(P, P0);
+
+  // Altitude IIR (pakai fungsi internal BMP390L)
+  float alt_iir = bmp.readAltitude(P0);
+
+  // Altitude FIR (eksternal Hamming)
+  float P_fir = firProcess(P);
+  float alt_fir = pressureToAltitude(P_fir, P0);
+
+  // Print format CSV: Temp, Pressure(hPa), RawAlt, IIRAlt, FIRAlt
+  Serial.print(T);      Serial.print(",");
+  Serial.print(P / 100.0); Serial.print(",");
+  Serial.print(alt_raw); Serial.print(",");
+  Serial.print(alt_iir); Serial.print(",");
+  Serial.println(alt_fir);
+
+  delay(20); // ~50 Hz
+}
