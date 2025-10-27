@@ -1,0 +1,483 @@
+import numpy as np
+import time
+from smbus2 import SMBus
+import matplotlib.pyplot as plt
+
+# ICM-20948 I2C Address
+ICM20948_ADDR = 0x69
+
+# Register Addresses
+REG_BANK_SEL = 0x7F
+PWR_MGMT_1 = 0x06
+ACCEL_XOUT_H = 0x2D
+GYRO_XOUT_H = 0x33
+MAG_XOUT_L = 0x11
+ACCEL_CONFIG = 0x14
+GYRO_CONFIG_1 = 0x01
+
+# Sensitivity Scale Factors (sesuai datasheet ICM-20948)
+# Accelerometer: ±2g → 16,384 LSB/g
+ACCEL_SENSITIVITY = 16384.0  # LSB/g
+
+# Gyroscope: ±250 dps → 131 LSB/(°/s)
+GYRO_SENSITIVITY = 131.0  # LSB/(°/s)
+
+# Magnetometer: ±4900 µT → 0.15 µT/LSB
+MAG_SENSITIVITY = 0.15  # µT/LSB
+
+class ICM20948:
+    def __init__(self, bus_num=1):
+        self.bus = SMBus(bus_num)
+        self.addr = ICM20948_ADDR
+        self.initialize()
+        
+    def write_register(self, bank, reg, value):
+        """Write to register with bank selection"""
+        # Select bank
+        self.bus.write_byte_data(self.addr, REG_BANK_SEL, bank << 4)
+        # Write register
+        self.bus.write_byte_data(self.addr, reg, value)
+        
+    def read_registers(self, bank, reg, length):
+        """Read multiple registers"""
+        self.bus.write_byte_data(self.addr, REG_BANK_SEL, bank << 4)
+        return self.bus.read_i2c_block_data(self.addr, reg, length)
+    
+    def initialize(self):
+        """Initialize ICM-20948"""
+        # Reset device
+        self.write_register(0, PWR_MGMT_1, 0x80)
+        time.sleep(0.1)
+        
+        # Auto select clock source
+        self.write_register(0, PWR_MGMT_1, 0x01)
+        time.sleep(0.01)
+        
+        # Configure Gyroscope (±250 dps)
+        self.write_register(2, GYRO_CONFIG_1, 0x00)
+        
+        # Configure Accelerometer (±2g)
+        self.write_register(2, ACCEL_CONFIG, 0x00)
+        
+        print("ICM-20948 initialized")
+        print(f"Accel sensitivity: {ACCEL_SENSITIVITY} LSB/g")
+        print(f"Gyro sensitivity: {GYRO_SENSITIVITY} LSB/(°/s)")
+        print(f"Mag sensitivity: {MAG_SENSITIVITY} µT/LSB")
+        
+    def read_accel(self):
+        """Read accelerometer data (x, y, z) dalam g"""
+        data = self.read_registers(0, ACCEL_XOUT_H, 6)
+        
+        # Convert to signed 16-bit
+        ax_raw = np.int16((data[0] << 8) | data[1])
+        ay_raw = np.int16((data[2] << 8) | data[3])
+        az_raw = np.int16((data[4] << 8) | data[5])
+        
+        # Convert ke besaran fisik (g)
+        ax = ax_raw / ACCEL_SENSITIVITY
+        ay = ay_raw / ACCEL_SENSITIVITY
+        az = az_raw / ACCEL_SENSITIVITY
+        
+        return np.array([ax, ay, az])
+    
+    def read_gyro(self):
+        """Read gyroscope data (x, y, z) dalam rad/s"""
+        data = self.read_registers(0, GYRO_XOUT_H, 6)
+        
+        # Convert to signed 16-bit
+        gx_raw = np.int16((data[0] << 8) | data[1])
+        gy_raw = np.int16((data[2] << 8) | data[3])
+        gz_raw = np.int16((data[4] << 8) | data[5])
+        
+        # Convert ke besaran fisik (°/s → rad/s)
+        gx = np.deg2rad(gx_raw / GYRO_SENSITIVITY)
+        gy = np.deg2rad(gy_raw / GYRO_SENSITIVITY)
+        gz = np.deg2rad(gz_raw / GYRO_SENSITIVITY)
+        
+        return np.array([gx, gy, gz])
+    
+    def read_mag(self):
+        """Read magnetometer data (x, y, z) dalam µT"""
+        # Magnetometer berada di bank 0, tapi perlu enable dulu
+        # Ini simplified version, real implementation butuh AK09916 setup
+        data = self.read_registers(0, MAG_XOUT_L, 6)
+        
+        # Convert to signed 16-bit (little endian untuk mag)
+        mx_raw = np.int16((data[1] << 8) | data[0])
+        my_raw = np.int16((data[3] << 8) | data[2])
+        mz_raw = np.int16((data[5] << 8) | data[4])
+        
+        # Convert ke besaran fisik (µT)
+        mx = mx_raw * MAG_SENSITIVITY
+        my = my_raw * MAG_SENSITIVITY
+        mz = mz_raw * MAG_SENSITIVITY
+        
+        return np.array([mx, my, mz])
+
+class QuaternionFilter:
+    def __init__(self, beta=0.1):
+        self.q = np.array([1.0, 0.0, 0.0, 0.0])  # w, x, y, z
+        self.beta = beta  # Madgwick filter gain
+        
+    def madgwick_update(self, gyro, accel, mag, dt):
+        """
+        Update quaternion menggunakan algoritma Madgwick 9DOF
+        gyro: [gx, gy, gz] dalam rad/s
+        accel: [ax, ay, az] dalam g
+        mag: [mx, my, mz] dalam µT
+        dt: delta time dalam detik
+        """
+        q = self.q
+        gx, gy, gz = gyro
+        ax, ay, az = accel
+        mx, my, mz = mag
+        
+        # Normalize accelerometer
+        norm = np.sqrt(ax**2 + ay**2 + az**2)
+        if norm == 0:
+            return
+        ax, ay, az = ax/norm, ay/norm, az/norm
+        
+        # Normalize magnetometer
+        norm = np.sqrt(mx**2 + my**2 + mz**2)
+        if norm == 0:
+            return
+        mx, my, mz = mx/norm, my/norm, mz/norm
+        
+        # Auxiliary variables
+        q0, q1, q2, q3 = q
+        _2q0, _2q1, _2q2, _2q3 = 2*q0, 2*q1, 2*q2, 2*q3
+        q0q0, q1q1, q2q2, q3q3 = q0**2, q1**2, q2**2, q3**2
+        
+        # Reference direction of Earth's magnetic field
+        hx = 2*mx*(0.5 - q2q2 - q3q3) + 2*my*(q1*q2 - q0*q3) + 2*mz*(q1*q3 + q0*q2)
+        hy = 2*mx*(q1*q2 + q0*q3) + 2*my*(0.5 - q1q1 - q3q3) + 2*mz*(q2*q3 - q0*q1)
+        bx = np.sqrt(hx**2 + hy**2)
+        bz = 2*mx*(q1*q3 - q0*q2) + 2*my*(q2*q3 + q0*q1) + 2*mz*(0.5 - q1q1 - q2q2)
+        
+        # Gradient descent algorithm
+        s0 = -_2q2*(2*(q1*q3 - q0*q2) - ax) + _2q1*(2*(q0*q1 + q2*q3) - ay) \
+             - bz*q2*(_2bx*(0.5 - q2q2 - q3q3) + _2bz*(q1*q3 - q0*q2) - mx) \
+             + (-_2bx*q3 + _2bz*q1)*(_2bx*(q1*q2 - q0*q3) + _2bz*(q0*q1 + q2*q3) - my) \
+             + _2bx*q2*(_2bx*(q0*q2 + q1*q3) + _2bz*(0.5 - q1q1 - q2q2) - mz)
+        
+        s1 = _2q3*(2*(q1*q3 - q0*q2) - ax) + _2q0*(2*(q0*q1 + q2*q3) - ay) \
+             - 4*q1*(1 - 2*(q1q1 + q2q2) - az) + _2bz*q3*(_2bx*(0.5 - q2q2 - q3q3) + _2bz*(q1*q3 - q0*q2) - mx) \
+             + (_2bx*q2 + _2bz*q0)*(_2bx*(q1*q2 - q0*q3) + _2bz*(q0*q1 + q2*q3) - my) \
+             + (_2bx*q3 - 4*bz*q1)*(_2bx*(q0*q2 + q1*q3) + _2bz*(0.5 - q1q1 - q2q2) - mz)
+        
+        s2 = -_2q0*(2*(q1*q3 - q0*q2) - ax) + _2q3*(2*(q0*q1 + q2*q3) - ay) \
+             - 4*q2*(1 - 2*(q1q1 + q2q2) - az) + (-4*bx*q2 - _2bz*q0)*(_2bx*(0.5 - q2q2 - q3q3) + _2bz*(q1*q3 - q0*q2) - mx) \
+             + (_2bx*q1 + _2bz*q3)*(_2bx*(q1*q2 - q0*q3) + _2bz*(q0*q1 + q2*q3) - my) \
+             + (_2bx*q0 - 4*bz*q2)*(_2bx*(q0*q2 + q1*q3) + _2bz*(0.5 - q1q1 - q2q2) - mz)
+        
+        s3 = _2q1*(2*(q1*q3 - q0*q2) - ax) + _2q2*(2*(q0*q1 + q2*q3) - ay) \
+             + (-4*bx*q3 + _2bz*q1)*(_2bx*(0.5 - q2q2 - q3q3) + _2bz*(q1*q3 - q0*q2) - mx) \
+             + (-_2bx*q0 + _2bz*q2)*(_2bx*(q1*q2 - q0*q3) + _2bz*(q0*q1 + q2*q3) - my) \
+             + _2bx*q1*(_2bx*(q0*q2 + q1*q3) + _2bz*(0.5 - q1q1 - q2q2) - mz)
+        
+        # Normalize gradient
+        norm = np.sqrt(s0**2 + s1**2 + s2**2 + s3**2)
+        if norm > 0:
+            s0, s1, s2, s3 = s0/norm, s1/norm, s2/norm, s3/norm
+        
+        # Rate of change of quaternion
+        qDot0 = 0.5*(-q1*gx - q2*gy - q3*gz) - self.beta*s0
+        qDot1 = 0.5*(q0*gx + q2*gz - q3*gy) - self.beta*s1
+        qDot2 = 0.5*(q0*gy - q1*gz + q3*gx) - self.beta*s2
+        qDot3 = 0.5*(q0*gz + q1*gy - q2*gx) - self.beta*s3
+        
+        # Integrate
+        q0 += qDot0 * dt
+        q1 += qDot1 * dt
+        q2 += qDot2 * dt
+        q3 += qDot3 * dt
+        
+        # Normalize quaternion
+        norm = np.sqrt(q0**2 + q1**2 + q2**2 + q3**2)
+        self.q = np.array([q0, q1, q2, q3]) / norm
+        
+    def get_euler(self):
+        """Convert quaternion to Euler angles (roll, pitch, yaw) dalam derajat"""
+        q0, q1, q2, q3 = self.q
+        
+        # Roll (A - rotation about X-axis)
+        roll = np.arctan2(2*(q0*q1 + q2*q3), 1 - 2*(q1**2 + q2**2))
+        
+        # Pitch (B - rotation about Y-axis)
+        sinp = 2*(q0*q2 - q3*q1)
+        if abs(sinp) >= 1:
+            pitch = np.copysign(np.pi/2, sinp)
+        else:
+            pitch = np.arcsin(sinp)
+        
+        # Yaw (C - rotation about Z-axis)
+        yaw = np.arctan2(2*(q0*q3 + q1*q2), 1 - 2*(q2**2 + q3**2))
+        
+        return np.rad2deg([roll, pitch, yaw])
+
+def calculate_rmse(errors):
+    """Calculate Root Mean Square Error"""
+    return np.sqrt(np.mean(np.array(errors)**2))
+
+def calculate_itae(errors, times):
+    """Calculate Integral of Time-weighted Absolute Error"""
+    errors = np.array(errors)
+    times = np.array(times)
+    return np.trapz(times * np.abs(errors), times)
+
+def load_imu_data_from_csv(filename):
+    """
+    Load data IMU dari file CSV
+    Format CSV yang diharapkan:
+    timestamp, ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw, mx_raw, my_raw, mz_raw
+    atau
+    timestamp, ax, ay, az, gx, gy, gz, mx, my, mz (jika sudah dalam besaran fisik)
+    """
+    import pandas as pd
+    
+    try:
+        df = pd.read_csv(filename)
+        print(f"Data loaded: {len(df)} samples")
+        print(f"Columns: {list(df.columns)}")
+        return df
+    except FileNotFoundError:
+        print(f"Error: File '{filename}' tidak ditemukan!")
+        return None
+    except Exception as e:
+        print(f"Error loading CSV: {e}")
+        return None
+
+def process_csv_data(df, is_raw_data=True):
+    """
+    Process data dari CSV
+    is_raw_data: True jika data masih dalam format RAW (LSB), False jika sudah dalam besaran fisik
+    """
+    if df is None:
+        return None
+    
+    data = {}
+    
+    # Deteksi kolom timestamp
+    time_cols = ['timestamp', 'time', 't', 'Time', 'Timestamp']
+    time_col = None
+    for col in time_cols:
+        if col in df.columns:
+            time_col = col
+            break
+    
+    if time_col:
+        data['timestamps'] = df[time_col].values
+    else:
+        # Buat timestamp otomatis jika tidak ada
+        dt = 0.01  # Asumsi 100 Hz
+        data['timestamps'] = np.arange(len(df)) * dt
+        print("Warning: Timestamp tidak ditemukan, menggunakan interval 0.01s (100Hz)")
+    
+    if is_raw_data:
+        # Data dalam format RAW (LSB) - perlu konversi
+        print("Mode: RAW data (LSB) - akan dikonversi ke besaran fisik")
+        
+        # Accelerometer RAW → g
+        data['accel'] = np.column_stack([
+            df['ax_raw'].values / ACCEL_SENSITIVITY,
+            df['ay_raw'].values / ACCEL_SENSITIVITY,
+            df['az_raw'].values / ACCEL_SENSITIVITY
+        ])
+        
+        # Gyroscope RAW → rad/s
+        data['gyro'] = np.column_stack([
+            np.deg2rad(df['gx_raw'].values / GYRO_SENSITIVITY),
+            np.deg2rad(df['gy_raw'].values / GYRO_SENSITIVITY),
+            np.deg2rad(df['gz_raw'].values / GYRO_SENSITIVITY)
+        ])
+        
+        # Magnetometer RAW → µT
+        data['mag'] = np.column_stack([
+            df['mx_raw'].values * MAG_SENSITIVITY,
+            df['my_raw'].values * MAG_SENSITIVITY,
+            df['mz_raw'].values * MAG_SENSITIVITY
+        ])
+    else:
+        # Data sudah dalam besaran fisik
+        print("Mode: Physical data (g, rad/s, µT)")
+        
+        # Accelerometer (g)
+        data['accel'] = np.column_stack([
+            df['ax'].values,
+            df['ay'].values,
+            df['az'].values
+        ])
+        
+        # Gyroscope (°/s → rad/s atau langsung rad/s)
+        # Cek apakah dalam derajat atau radian
+        gx_sample = df['gx'].values[0] if len(df) > 0 else 0
+        if abs(gx_sample) > 10:  # Kemungkinan dalam °/s
+            print("Gyro data detected in °/s, converting to rad/s")
+            data['gyro'] = np.column_stack([
+                np.deg2rad(df['gx'].values),
+                np.deg2rad(df['gy'].values),
+                np.deg2rad(df['gz'].values)
+            ])
+        else:
+            data['gyro'] = np.column_stack([
+                df['gx'].values,
+                df['gy'].values,
+                df['gz'].values
+            ])
+        
+        # Magnetometer (µT)
+        data['mag'] = np.column_stack([
+            df['mx'].values,
+            df['my'].values,
+            df['mz'].values
+        ])
+    
+    return data
+
+def main():
+    print("="*60)
+    print("Quaternion 9DOF IMU ICM-20948 dengan RMSE dan ITAE")
+    print("Pembacaan dari File CSV")
+    print("="*60)
+    print()
+    
+    # Minta input file CSV
+    csv_file = input("Masukkan nama file CSV (contoh: imu_data.csv): ").strip()
+    if not csv_file:
+        csv_file = "imu_data.csv"  # Default filename
+    
+    # Tanya apakah data RAW atau sudah dalam besaran fisik
+    is_raw = input("Apakah data dalam format RAW/LSB? (y/n, default=y): ").strip().lower()
+    is_raw_data = is_raw != 'n'
+    
+    # Load data dari CSV
+    df = load_imu_data_from_csv(csv_file)
+    if df is None:
+        print("\nMembuat contoh file CSV...")
+        create_example_csv("imu_data.csv")
+        print(f"File contoh 'imu_data.csv' telah dibuat!")
+        print("Silakan edit file tersebut dengan data Anda atau gunakan file yang sudah ada.")
+        return
+    
+    # Process data
+    data = process_csv_data(df, is_raw_data)
+    if data is None:
+        return
+    
+    print()
+    print(f"Total samples: {len(data['timestamps'])}")
+    print(f"Duration: {data['timestamps'][-1] - data['timestamps'][0]:.2f} seconds")
+    print()
+    
+    # Initialize filter
+    qfilter = QuaternionFilter(beta=0.1)
+    
+    # Storage untuk analisis
+    quaternions = []
+    euler_angles = []
+    errors_roll = []
+    errors_pitch = []
+    errors_yaw = []
+    
+    # Ground truth (referensi) untuk error calculation
+    # Bisa disesuaikan dengan nilai referensi yang diinginkan
+    true_roll, true_pitch, true_yaw = 0, 0, 0
+    
+    print("Processing data...")
+    
+    for i in range(len(data['timestamps'])):
+        # Hitung delta time
+        if i == 0:
+            dt = 0.01  # Initial dt
+        else:
+            dt = data['timestamps'][i] - data['timestamps'][i-1]
+        
+        # Get sensor data
+        accel = data['accel'][i]
+        gyro = data['gyro'][i]
+        mag = data['mag'][i]
+        
+        # Update quaternion
+        qfilter.madgwick_update(gyro, accel, mag, dt)
+        
+        # Get Euler angles
+        roll, pitch, yaw = qfilter.get_euler()
+        
+        # Store data
+        quaternions.append(qfilter.q.copy())
+        euler_angles.append([roll, pitch, yaw])
+        
+        # Calculate errors (dibandingkan dengan ground truth)
+        errors_roll.append(roll - true_roll)
+        errors_pitch.append(pitch - true_pitch)
+        errors_yaw.append(yaw - true_yaw)
+        
+        # Print setiap 10% progress
+        if i % max(1, len(data['timestamps']) // 10) == 0:
+            progress = (i / len(data['timestamps'])) * 100
+            print(f"Progress: {progress:.0f}% | t={data['timestamps'][i]:.2f}s | "
+                  f"Q: [{qfilter.q[0]:.3f}, {qfilter.q[1]:.3f}, {qfilter.q[2]:.3f}, {qfilter.q[3]:.3f}]")
+            print(f"         | Euler: Roll={roll:.2f}°, Pitch={pitch:.2f}°, Yaw={yaw:.2f}°")
+            print()
+    
+    # Calculate metrics
+    print("="*60)
+    print("ANALISIS ERROR")
+    print("="*60)
+    
+    rmse_roll = calculate_rmse(errors_roll)
+    rmse_pitch = calculate_rmse(errors_pitch)
+    rmse_yaw = calculate_rmse(errors_yaw)
+    
+    itae_roll = calculate_itae(errors_roll, timestamps)
+    itae_pitch = calculate_itae(errors_pitch, timestamps)
+    itae_yaw = calculate_itae(errors_yaw, timestamps)
+    
+    print(f"\nRoot Mean Square Error (RMSE):")
+    print(f"  Roll (A):  {rmse_roll:.4f}°")
+    print(f"  Pitch (B): {rmse_pitch:.4f}°")
+    print(f"  Yaw (C):   {rmse_yaw:.4f}°")
+    
+    print(f"\nIntegral Time Absolute Error (ITAE):")
+    print(f"  Roll (A):  {itae_roll:.4f} °·s")
+    print(f"  Pitch (B): {itae_pitch:.4f} °·s")
+    print(f"  Yaw (C):   {itae_yaw:.4f} °·s")
+    
+    print(f"\nTotal RMSE: {np.sqrt(rmse_roll**2 + rmse_pitch**2 + rmse_yaw**2):.4f}°")
+    print(f"Total ITAE: {itae_roll + itae_pitch + itae_yaw:.4f} °·s")
+    
+    # Plot hasil
+    plot_results(timestamps, euler_angles, errors_roll, errors_pitch, errors_yaw)
+
+def plot_results(times, euler, err_roll, err_pitch, err_yaw):
+    """Plot Euler angles dan errors"""
+    euler = np.array(euler)
+    
+    fig, axes = plt.subplots(2, 1, figsize=(12, 8))
+    
+    # Plot Euler angles
+    axes[0].plot(times, euler[:, 0], label='Roll (A)', linewidth=2)
+    axes[0].plot(times, euler[:, 1], label='Pitch (B)', linewidth=2)
+    axes[0].plot(times, euler[:, 2], label='Yaw (C)', linewidth=2)
+    axes[0].set_xlabel('Time (s)')
+    axes[0].set_ylabel('Angle (°)')
+    axes[0].set_title('Euler Angles from Quaternion (9DOF)')
+    axes[0].legend()
+    axes[0].grid(True)
+    
+    # Plot errors
+    axes[1].plot(times, err_roll, label='Roll Error', linewidth=2)
+    axes[1].plot(times, err_pitch, label='Pitch Error', linewidth=2)
+    axes[1].plot(times, err_yaw, label='Yaw Error', linewidth=2)
+    axes[1].set_xlabel('Time (s)')
+    axes[1].set_ylabel('Error (°)')
+    axes[1].set_title('Estimation Errors')
+    axes[1].legend()
+    axes[1].grid(True)
+    
+    plt.tight_layout()
+    plt.show()
+
+if __name__ == "__main__":
+    main()
